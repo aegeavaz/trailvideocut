@@ -1,3 +1,5 @@
+import bisect
+
 from smartcut.audio.models import AudioAnalysis, BeatInfo
 from smartcut.config import SmartCutConfig
 from smartcut.editor.models import CutPlan, EditDecision
@@ -31,11 +33,18 @@ class SegmentSelector:
         # Compute video duration from segments
         video_duration = segments[-1].end_time
 
+        # Pre-sort segments by midpoint and extract midpoints/start_times for binary search
+        sorted_segments = sorted(segments, key=lambda s: s.midpoint)
+        midpoints = [s.midpoint for s in sorted_segments]
+        start_times = [s.start_time for s in sorted_segments]
+
         # Compute proportional zones
         zones = self._compute_zones(intervals, video_duration)
 
         # Resolve must-include timestamps to zones
-        include_map, include_anchors = self._resolve_includes(zones, segments)
+        include_map, include_anchors = self._resolve_includes(
+            zones, sorted_segments, midpoints, start_times
+        )
 
         # For each zone, pick the best segment
         decisions: list[EditDecision] = []
@@ -46,11 +55,15 @@ class SegmentSelector:
             if idx in include_map:
                 best = include_map[idx]
             else:
-                best = self._pick_best_in_zone(segments, zone_start, zone_end)
+                best = self._pick_best_in_zone(
+                    sorted_segments, midpoints, zone_start, zone_end
+                )
 
             if best is None:
                 # No candidate in zone — find nearest segment
-                best = self._nearest_segment(segments, (zone_start + zone_end) / 2)
+                best = self._nearest_segment(
+                    sorted_segments, midpoints, (zone_start + zone_end) / 2
+                )
 
             anchor = include_anchors.get(idx)
             source_start, source_end = self._align_segment(best, needed_duration, anchor)
@@ -107,29 +120,42 @@ class SegmentSelector:
 
     def _pick_best_in_zone(
         self,
-        segments: list[VideoSegment],
+        sorted_segments: list[VideoSegment],
+        midpoints: list[float],
         zone_start: float,
         zone_end: float,
     ) -> VideoSegment | None:
-        """Pick the segment with the highest composite score whose midpoint falls in the zone."""
-        candidates = [
-            s for s in segments
-            if s.midpoint >= zone_start and s.midpoint < zone_end
-        ]
-        if not candidates:
+        """Pick the segment with the highest composite score whose midpoint falls in the zone.
+
+        Uses binary search on pre-sorted midpoints for O(log N) lookup.
+        """
+        lo = bisect.bisect_left(midpoints, zone_start)
+        hi = bisect.bisect_left(midpoints, zone_end)
+        if lo >= hi:
             return None
-        return max(candidates, key=lambda s: s.interest.composite)
+        return max(sorted_segments[lo:hi], key=lambda s: s.interest.composite)
 
     def _nearest_segment(
-        self, segments: list[VideoSegment], target_time: float
+        self,
+        sorted_segments: list[VideoSegment],
+        midpoints: list[float],
+        target_time: float,
     ) -> VideoSegment:
-        """Find the segment whose midpoint is closest to target_time."""
-        return min(segments, key=lambda s: abs(s.midpoint - target_time))
+        """Find the segment whose midpoint is closest to target_time using binary search."""
+        pos = bisect.bisect_left(midpoints, target_time)
+        candidates = []
+        if pos < len(sorted_segments):
+            candidates.append(sorted_segments[pos])
+        if pos > 0:
+            candidates.append(sorted_segments[pos - 1])
+        return min(candidates, key=lambda s: abs(s.midpoint - target_time))
 
     def _resolve_includes(
         self,
         zones: list[tuple[float, float, BeatInfo, BeatInfo]],
-        segments: list[VideoSegment],
+        sorted_segments: list[VideoSegment],
+        midpoints: list[float],
+        start_times: list[float],
     ) -> tuple[dict[int, VideoSegment], dict[int, float]]:
         """Map user-specified must-include timestamps to their zone's segment.
 
@@ -142,7 +168,7 @@ class SegmentSelector:
             # Find which zone contains this timestamp
             for idx, (zone_start, zone_end, _, _) in enumerate(zones):
                 if zone_start <= ts < zone_end:
-                    seg = self._find_segment_at(segments, ts)
+                    seg = self._find_segment_at(sorted_segments, midpoints, ts)
                     if seg is not None:
                         include_map[idx] = seg
                         include_anchors[idx] = ts
@@ -150,14 +176,29 @@ class SegmentSelector:
         return include_map, include_anchors
 
     def _find_segment_at(
-        self, segments: list[VideoSegment], timestamp: float
+        self,
+        sorted_segments: list[VideoSegment],
+        midpoints: list[float],
+        timestamp: float,
     ) -> VideoSegment | None:
-        """Find the segment that contains the given timestamp."""
-        for seg in segments:
+        """Find the segment that contains the given timestamp using binary search."""
+        # Find segments near this timestamp by midpoint proximity
+        pos = bisect.bisect_left(midpoints, timestamp)
+
+        # Check neighbors around the insertion point for containment
+        best = None
+        for i in range(max(0, pos - 5), min(len(sorted_segments), pos + 5)):
+            seg = sorted_segments[i]
             if seg.start_time <= timestamp <= seg.end_time:
-                return seg
-        if segments:
-            return min(segments, key=lambda s: abs(s.midpoint - timestamp))
+                best = seg
+                break
+
+        if best is not None:
+            return best
+
+        # Fallback: nearest by midpoint
+        if sorted_segments:
+            return self._nearest_segment(sorted_segments, midpoints, timestamp)
         return None
 
     def _align_segment(

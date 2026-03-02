@@ -47,6 +47,9 @@ def cut(
     preset: str = typer.Option(
         "medium", "--preset", help="ffmpeg encoding preset (ultrafast..veryslow)"
     ),
+    threads: int = typer.Option(
+        0, "--threads", help="FFmpeg encoding threads (0 = auto-detect)"
+    ),
 ):
     """Cut a motorcycle POV video to sync with a song's beats."""
     config = SmartCutConfig(
@@ -62,6 +65,7 @@ def cut(
         max_segment_duration=max_segment,
         output_fps=output_fps,
         output_preset=preset,
+        output_threads=threads,
     )
 
     console.print("[bold]SmartCut[/] - Beat-synced video editor")

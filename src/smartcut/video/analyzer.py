@@ -1,3 +1,7 @@
+import bisect
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 import cv2
 import numpy as np
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRemainingColumn
@@ -13,6 +17,27 @@ from smartcut.video.scorers import (
 )
 
 
+def _score_single_frame(
+    index: int,
+    current_time: float,
+    gray: np.ndarray,
+    color: np.ndarray,
+    prev_gray: np.ndarray | None,
+    prev_color: np.ndarray | None,
+) -> tuple[int, float, dict[str, float]]:
+    """Score a single frame with all 4 scorers. Thread-safe, no shared mutable state.
+
+    Returns (index, time, scores) so results can be placed back in order.
+    """
+    scores: dict[str, float] = {}
+    if prev_gray is not None:
+        scores["optical_flow"] = score_optical_flow(prev_gray, gray)
+        scores["color_change"] = score_color_histogram_change(prev_color, color)
+        scores["brightness_change"] = score_brightness_change(prev_gray, gray)
+    scores["edge_variance"] = score_edge_variance(gray)
+    return (index, current_time, scores)
+
+
 class VideoAnalyzer:
     """Analyze video for visual interest scoring using overlapping windows."""
 
@@ -21,25 +46,40 @@ class VideoAnalyzer:
         self.source_fps: float = 30.0
 
     def analyze(self) -> list[VideoSegment]:
-        """Analyze entire video, return scored segments with overlapping windows."""
-        # Step 1: Detect scene boundaries
-        boundary_detector = SceneBoundaryDetector(self.config)
-        boundaries = boundary_detector.detect_boundaries()
+        """Analyze entire video, return scored segments with overlapping windows.
 
-        # Step 2: Score all sampled frames into a flat list
-        frame_data = self._score_frames()
+        Runs scene detection concurrently with frame reading+scoring. Scene
+        detection and frame reading each open their own VideoCapture, so they
+        run in parallel without blocking each other.
+        """
+        # Run scene detection and frame reading+scoring concurrently
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            boundary_future = executor.submit(self._detect_boundaries)
+            score_future = executor.submit(self._read_and_score)
+
+            frame_data = score_future.result()
+            boundaries = boundary_future.result()
+
         if not frame_data:
             return []
 
         video_duration = frame_data[-1][0] + (1.0 / self.config.analysis_fps)
-
-        # Step 3: Build overlapping windows from frame_data
         segments = self._build_overlapping_windows(frame_data, video_duration, boundaries)
-
         return self._normalize_segments(segments)
 
-    def _score_frames(self) -> list[tuple[float, dict[str, float]]]:
-        """Pass 1: iterate frames, score each sampled frame into a flat list."""
+    def _detect_boundaries(self) -> list[float]:
+        """Run PySceneDetect's optimized scene detection (auto-downscales internally)."""
+        detector = SceneBoundaryDetector(self.config)
+        return detector.detect_boundaries()
+
+    def _read_and_score(self) -> list[tuple[float, dict[str, float]]]:
+        """Read sampled frames and score them with overlapped parallelism.
+
+        The main thread reads and preprocesses frames sequentially. As each
+        sampled frame is read, its scoring job is immediately submitted to a
+        thread pool. Scoring runs concurrently with reading — by the time all
+        frames are read, most scoring is already done.
+        """
         cap = cv2.VideoCapture(str(self.config.video_path))
         if not cap.isOpened():
             raise RuntimeError(f"Cannot open video: {self.config.video_path}")
@@ -49,9 +89,9 @@ class VideoAnalyzer:
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         sample_interval = max(1, int(fps / self.config.analysis_fps))
 
-        frame_data: list[tuple[float, dict[str, float]]] = []
-        prev_gray: np.ndarray | None = None
-        prev_frame: np.ndarray | None = None
+        num_workers = max(4, (os.cpu_count() or 4) - 2)
+        raw_frames: list[tuple[float, np.ndarray, np.ndarray]] = []
+        pending: list[tuple[int, object]] = []
         frame_idx = 0
 
         with Progress(
@@ -61,36 +101,44 @@ class VideoAnalyzer:
             TextColumn("{task.percentage:>3.0f}%"),
             TimeRemainingColumn(),
         ) as progress:
-            task = progress.add_task("Scoring video frames", total=total_frames)
+            task = progress.add_task(
+                f"Analyzing video ({num_workers} scoring threads)",
+                total=total_frames,
+            )
 
-            while True:
-                ret, frame = cap.read()
-                if not ret:
-                    break
+            with ThreadPoolExecutor(max_workers=num_workers) as executor:
+                while True:
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
 
-                progress.update(task, advance=1)
+                    if frame_idx % sample_interval == 0:
+                        current_time = frame_idx / fps
+                        frame_small = cv2.resize(frame, (640, 360))
+                        gray_small = cv2.cvtColor(frame_small, cv2.COLOR_BGR2GRAY)
 
-                if frame_idx % sample_interval != 0:
+                        i = len(raw_frames)
+                        prev_gray = raw_frames[-1][1] if raw_frames else None
+                        prev_color = raw_frames[-1][2] if raw_frames else None
+                        raw_frames.append((current_time, gray_small, frame_small))
+
+                        # Submit scoring immediately — overlaps with reading
+                        future = executor.submit(
+                            _score_single_frame, i, current_time,
+                            gray_small, frame_small, prev_gray, prev_color,
+                        )
+                        pending.append((i, future))
+
                     frame_idx += 1
-                    continue
+                    progress.update(task, completed=frame_idx)
 
-                current_time = frame_idx / fps
-                frame_small = cv2.resize(frame, (640, 360))
-                gray_small = cv2.cvtColor(frame_small, cv2.COLOR_BGR2GRAY)
+                progress.update(task, completed=total_frames)
 
-                scores: dict[str, float] = {}
-                if prev_gray is not None:
-                    scores["optical_flow"] = score_optical_flow(prev_gray, gray_small)
-                    scores["color_change"] = score_color_histogram_change(
-                        prev_frame, frame_small
-                    )
-                    scores["brightness_change"] = score_brightness_change(prev_gray, gray_small)
-                scores["edge_variance"] = score_edge_variance(gray_small)
-
-                frame_data.append((current_time, scores))
-                prev_gray = gray_small
-                prev_frame = frame_small
-                frame_idx += 1
+                # Collect scoring results (most are already done by now)
+                frame_data: list[tuple[float, dict[str, float]] | None] = [None] * len(raw_frames)
+                for i, future in pending:
+                    index, current_time, scores = future.result()
+                    frame_data[index] = (current_time, scores)
 
         cap.release()
         return frame_data
@@ -101,14 +149,22 @@ class VideoAnalyzer:
         video_duration: float,
         boundaries: list[float],
     ) -> list[VideoSegment]:
-        """Pass 2: build overlapping windows at segment_hop intervals."""
+        """Build overlapping windows using binary search for O(M*logN) performance."""
         hop = self.config.segment_hop
         window = self.config.segment_window
         segments: list[VideoSegment] = []
 
+        # Extract sorted times array for binary search
+        times = [t for t, _ in frame_data]
+        sorted_boundaries = sorted(boundaries)
+
         window_start = 0.0
         while window_start < video_duration:
             window_end = min(window_start + window, video_duration)
+
+            # Binary search for frame slice boundaries
+            lo = bisect.bisect_left(times, window_start)
+            hi = bisect.bisect_left(times, window_end)
 
             # Gather frame scores within this window
             window_scores: dict[str, list[float]] = {
@@ -117,18 +173,15 @@ class VideoAnalyzer:
                 "edge_variance": [],
                 "brightness_change": [],
             }
-            for t, scores in frame_data:
-                if t < window_start:
-                    continue
-                if t >= window_end:
-                    break
+            for i in range(lo, hi):
+                _, scores = frame_data[i]
                 for key in window_scores:
                     if key in scores:
                         window_scores[key].append(scores[key])
 
             if any(window_scores.values()):
                 segment = self._finalize_window(
-                    window_start, window_end, window_scores, boundaries
+                    window_start, window_end, window_scores, sorted_boundaries
                 )
                 segments.append(segment)
 
@@ -154,7 +207,9 @@ class VideoAnalyzer:
             edge_variance=safe_mean(scores["edge_variance"]),
             brightness_change=safe_mean(scores["brightness_change"]),
         )
-        near_boundary = any(start <= b <= end for b in boundaries)
+        # Binary search for boundary check: O(log B) instead of O(B)
+        lo = bisect.bisect_left(boundaries, start)
+        near_boundary = lo < len(boundaries) and boundaries[lo] <= end
         return VideoSegment(
             start_time=start, end_time=end, interest=interest, scene_boundary_near=near_boundary
         )

@@ -1,13 +1,16 @@
+from concurrent.futures import ThreadPoolExecutor
 from fractions import Fraction
 
 from rich.console import Console
 
 from smartcut.audio.analyzer import AudioAnalyzer
+from smartcut.audio.models import AudioAnalysis
 from smartcut.audio.structure import MusicalStructureAnalyzer
 from smartcut.config import SmartCutConfig
 from smartcut.editor.assembler import VideoAssembler
 from smartcut.editor.selector import SegmentSelector
 from smartcut.video.analyzer import VideoAnalyzer
+from smartcut.video.models import VideoSegment
 
 console = Console()
 
@@ -22,35 +25,35 @@ class SmartCutPipeline:
         """Execute the full pipeline."""
         self._validate_inputs()
 
-        # Phase 1: Audio analysis
-        console.print("\n[bold blue]Phase 1/4:[/] Analyzing audio...")
-        audio_analyzer = AudioAnalyzer(self.config)
-        audio_analysis = audio_analyzer.analyze()
+        # Run audio and video analysis concurrently — they are fully independent
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            audio_future = executor.submit(self._run_audio_analysis)
+            video_future = executor.submit(self._run_video_analysis)
+
+            # Video analysis takes much longer; audio results arrive first
+            audio_analysis = audio_future.result()
+            segments, source_fps = video_future.result()
+
+        # Print audio results (buffered until both phases done)
+        console.print("\n[bold blue]Phase 1/4:[/] Audio analysis complete")
         console.print(
             f"  Tempo: {audio_analysis.tempo:.1f} BPM, "
             f"{len(audio_analysis.beats)} beats detected, "
             f"duration: {audio_analysis.duration:.1f}s"
         )
-
-        # Phase 1b: Musical structure
-        console.print("[bold blue]Phase 1b/4:[/] Detecting musical structure...")
-        structure_analyzer = MusicalStructureAnalyzer()
-        audio_analysis.sections = structure_analyzer.analyze(str(self.config.audio_path))
         for s in audio_analysis.sections:
             console.print(
                 f"  [{s.label:8s}] {s.start_time:6.1f}s - {s.end_time:6.1f}s "
                 f"(energy: {s.energy:.2f})"
             )
 
-        # Phase 2: Video analysis
-        console.print("\n[bold blue]Phase 2/4:[/] Analyzing video for visual interest...")
-        video_analyzer = VideoAnalyzer(self.config)
-        segments = video_analyzer.analyze()
+        # Print video results
+        console.print(f"\n[bold blue]Phase 2/4:[/] Video analysis complete")
         console.print(f"  {len(segments)} segments scored")
 
         # Resolve auto-detect FPS from source video
         if self.config.output_fps == 0:
-            self.config.output_fps = video_analyzer.source_fps
+            self.config.output_fps = source_fps
             frac = Fraction(self.config.output_fps).limit_denominator(100000)
             console.print(f"  Using source video FPS: {frac.numerator}/{frac.denominator} ({self.config.output_fps:.6f})")
 
@@ -77,6 +80,24 @@ class SmartCutPipeline:
         assembler = VideoAssembler(self.config)
         assembler.assemble(cut_plan)
         console.print(f"\n[bold green]Done![/] Output saved to: {self.config.output_path}")
+
+    def _run_audio_analysis(self) -> AudioAnalysis:
+        """Phase 1 + 1b: Analyze audio beats and musical structure."""
+        audio_analyzer = AudioAnalyzer(self.config)
+        audio_analysis = audio_analyzer.analyze()
+
+        structure_analyzer = MusicalStructureAnalyzer()
+        audio_analysis.sections = structure_analyzer.analyze(
+            str(self.config.audio_path), y=audio_analysis.raw_audio
+        )
+
+        return audio_analysis
+
+    def _run_video_analysis(self) -> tuple[list[VideoSegment], float]:
+        """Phase 2: Analyze video for visual interest."""
+        video_analyzer = VideoAnalyzer(self.config)
+        segments = video_analyzer.analyze()
+        return segments, video_analyzer.source_fps
 
     def _validate_inputs(self) -> None:
         """Validate input files exist and have supported formats."""

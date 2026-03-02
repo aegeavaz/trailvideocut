@@ -25,6 +25,7 @@ class AudioAnalyzer:
             beats=beats,
             onset_envelope=onset_env,
             sample_rate=sr,
+            raw_audio=y,
         )
 
     def _load_audio(self) -> tuple[np.ndarray, int]:

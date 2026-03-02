@@ -7,9 +7,10 @@ from smartcut.audio.models import MusicSection
 class MusicalStructureAnalyzer:
     """Detect musical structure (intro/verse/chorus/bridge/outro) via spectral segmentation."""
 
-    def analyze(self, audio_path: str, sr: int = 22050) -> list[MusicSection]:
+    def analyze(self, audio_path: str, sr: int = 22050, y: np.ndarray | None = None) -> list[MusicSection]:
         """Segment the audio into structural sections."""
-        y, sr = librosa.load(audio_path, sr=sr)
+        if y is None:
+            y, sr = librosa.load(audio_path, sr=sr)
         duration = librosa.get_duration(y=y, sr=sr)
 
         # Compute chroma features for segmentation

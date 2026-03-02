@@ -32,3 +32,4 @@ class AudioAnalysis:
     sections: list[MusicSection] = field(default_factory=list)
     onset_envelope: np.ndarray = field(default_factory=lambda: np.array([]))
     sample_rate: int = 22050
+    raw_audio: np.ndarray | None = field(default=None, repr=False)

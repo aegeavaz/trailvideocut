@@ -37,4 +37,4 @@ class SmartCutConfig:
     output_codec: str = "libx264"
     output_audio_codec: str = "aac"
     output_preset: str = "medium"
-    output_threads: int = 4
+    output_threads: int = 0

@@ -1,3 +1,4 @@
+import os
 from fractions import Fraction
 
 from rich.console import Console
@@ -15,6 +16,16 @@ class VideoAssembler:
 
     def __init__(self, config: SmartCutConfig):
         self.config = config
+
+    def _get_threads(self) -> int:
+        """Return the number of FFmpeg threads to use.
+
+        If output_threads is 0 (auto), use max(4, cpu_count - 2).
+        """
+        if self.config.output_threads > 0:
+            return self.config.output_threads
+        cpu = os.cpu_count() or 4
+        return max(4, cpu - 2)
 
     def assemble(self, plan: CutPlan) -> None:
         """Execute the cut plan: extract subclips, concatenate, add audio, export."""
@@ -52,7 +63,7 @@ class VideoAssembler:
                 codec=self.config.output_codec,
                 audio_codec=self.config.output_audio_codec,
                 preset=self.config.output_preset,
-                threads=self.config.output_threads,
+                threads=self._get_threads(),
                 ffmpeg_params=["-r", fps_rational],
                 logger="bar",
             )
