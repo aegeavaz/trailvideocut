@@ -1,3 +1,5 @@
+from fractions import Fraction
+
 from rich.console import Console
 
 from moviepy import VideoFileClip, AudioFileClip, concatenate_videoclips
@@ -42,6 +44,8 @@ class VideoAssembler:
             final_video = final_video.with_audio(trimmed_audio)
 
             console.print(f"  Exporting to {self.config.output_path}...")
+            frac = Fraction(self.config.output_fps).limit_denominator(100000)
+            fps_rational = f"{frac.numerator}/{frac.denominator}"
             final_video.write_videofile(
                 str(self.config.output_path),
                 fps=self.config.output_fps,
@@ -49,6 +53,7 @@ class VideoAssembler:
                 audio_codec=self.config.output_audio_codec,
                 preset=self.config.output_preset,
                 threads=self.config.output_threads,
+                ffmpeg_params=["-r", fps_rational],
                 logger="bar",
             )
         finally:

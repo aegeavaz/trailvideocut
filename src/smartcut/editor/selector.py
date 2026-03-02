@@ -1,48 +1,59 @@
-import numpy as np
-
 from smartcut.audio.models import AudioAnalysis, BeatInfo
-from smartcut.config import SegmentPreference, SmartCutConfig
+from smartcut.config import SmartCutConfig
 from smartcut.editor.models import CutPlan, EditDecision
 from smartcut.video.models import VideoSegment
 
 
 class SegmentSelector:
-    """Select the best video segments to match beat intervals."""
+    """Select video segments using zone-based chronological selection.
+
+    The video timeline is divided into N proportional zones (one per beat interval).
+    Within each zone, the highest-scoring segment is selected.
+    This guarantees: chronological order, no reuse, and visual interest.
+    """
 
     def __init__(self, config: SmartCutConfig):
         self.config = config
 
     def select(self, audio: AudioAnalysis, segments: list[VideoSegment]) -> CutPlan:
-        """Given beats and scored video segments, produce a CutPlan."""
+        """Produce a CutPlan by dividing the video into zones aligned to beat intervals."""
         beats = audio.beats
         if len(beats) < 2:
             raise ValueError("Need at least 2 beats to create a cut plan")
+        if not segments:
+            raise ValueError("No video segments available")
 
         # Build beat intervals
-        intervals = []
-        for i in range(len(beats) - 1):
-            intervals.append((beats[i], beats[i + 1], beats[i + 1].timestamp - beats[i].timestamp))
+        intervals = [
+            (beats[i], beats[i + 1]) for i in range(len(beats) - 1)
+        ]
 
-        # Pre-assign must-include timestamps
-        reserved = self._reserve_includes(intervals, segments)
+        # Compute video duration from segments
+        video_duration = segments[-1].end_time
 
-        # Select segments for each interval
+        # Compute proportional zones
+        zones = self._compute_zones(intervals, video_duration)
+
+        # Resolve must-include timestamps to zones
+        include_map, include_anchors = self._resolve_includes(zones, segments)
+
+        # For each zone, pick the best segment
         decisions: list[EditDecision] = []
-        used_midpoints: list[float] = []
+        for idx, (zone_start, zone_end, beat_start, beat_end) in enumerate(zones):
+            needed_duration = beat_end.timestamp - beat_start.timestamp
 
-        for idx, (beat_start, beat_end, needed_duration) in enumerate(intervals):
-            # Check if this interval has a reserved segment
-            if idx in reserved:
-                best_segment = reserved[idx]
+            # Check if this zone has a forced include
+            if idx in include_map:
+                best = include_map[idx]
             else:
-                best_segment = self._find_best_segment(
-                    segments, needed_duration, used_midpoints, beat_start
-                )
+                best = self._pick_best_in_zone(segments, zone_start, zone_end)
 
-            if best_segment is None:
-                best_segment = self._fallback_segment(segments, needed_duration, used_midpoints)
+            if best is None:
+                # No candidate in zone — find nearest segment
+                best = self._nearest_segment(segments, (zone_start + zone_end) / 2)
 
-            source_start, source_end = self._align_segment(best_segment, needed_duration)
+            anchor = include_anchors.get(idx)
+            source_start, source_end = self._align_segment(best, needed_duration, anchor)
 
             decisions.append(
                 EditDecision(
@@ -51,130 +62,183 @@ class SegmentSelector:
                     source_end=source_end,
                     target_start=beat_start.timestamp,
                     target_end=beat_end.timestamp,
-                    interest_score=best_segment.interest.composite,
+                    interest_score=best.interest.composite,
                 )
             )
-            used_midpoints.append(best_segment.midpoint)
+
+        # Merge consecutive decisions with adjacent source positions
+        merged = self._merge_continuous(decisions)
 
         return CutPlan(
-            decisions=decisions,
+            decisions=merged,
             total_duration=beats[-1].timestamp - beats[0].timestamp,
             song_tempo=audio.tempo,
             transition_style=self.config.transition_style.value,
             crossfade_duration=self.config.crossfade_duration,
+            zones_analyzed=len(decisions),
         )
 
-    def _reserve_includes(
+    def _compute_zones(
         self,
-        intervals: list[tuple[BeatInfo, BeatInfo, float]],
-        segments: list[VideoSegment],
-    ) -> dict[int, VideoSegment]:
-        """Pre-assign user-specified must-include timestamps to their nearest beat intervals."""
-        reserved: dict[int, VideoSegment] = {}
-        for ts in self.config.include_timestamps:
-            # Find the segment containing this timestamp
-            seg = self._find_segment_at(segments, ts)
-            if seg is None:
-                continue
-            # Find the nearest beat interval
-            best_idx = 0
-            best_dist = float("inf")
-            for idx, (beat_start, beat_end, _) in enumerate(intervals):
-                mid = (beat_start.timestamp + beat_end.timestamp) / 2
-                dist = abs(ts - mid)
-                if dist < best_dist:
-                    best_dist = dist
-                    best_idx = idx
-            reserved[best_idx] = seg
-        return reserved
+        intervals: list[tuple[BeatInfo, BeatInfo]],
+        video_duration: float,
+    ) -> list[tuple[float, float, BeatInfo, BeatInfo]]:
+        """Divide the video timeline into N proportional zones.
 
-    def _find_segment_at(self, segments: list[VideoSegment], timestamp: float) -> VideoSegment | None:
+        Each zone's duration is proportional to its beat interval's share
+        of the total song duration. Returns (zone_start, zone_end, beat_start, beat_end).
+        """
+        total_beat_time = sum(
+            b2.timestamp - b1.timestamp for b1, b2 in intervals
+        )
+        if total_beat_time <= 0:
+            total_beat_time = 1.0
+
+        zones = []
+        video_cursor = 0.0
+        for beat_start, beat_end in intervals:
+            beat_dur = beat_end.timestamp - beat_start.timestamp
+            zone_dur = (beat_dur / total_beat_time) * video_duration
+            zone_end = min(video_cursor + zone_dur, video_duration)
+            zones.append((video_cursor, zone_end, beat_start, beat_end))
+            video_cursor = zone_end
+
+        return zones
+
+    def _pick_best_in_zone(
+        self,
+        segments: list[VideoSegment],
+        zone_start: float,
+        zone_end: float,
+    ) -> VideoSegment | None:
+        """Pick the segment with the highest composite score whose midpoint falls in the zone."""
+        candidates = [
+            s for s in segments
+            if s.midpoint >= zone_start and s.midpoint < zone_end
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda s: s.interest.composite)
+
+    def _nearest_segment(
+        self, segments: list[VideoSegment], target_time: float
+    ) -> VideoSegment:
+        """Find the segment whose midpoint is closest to target_time."""
+        return min(segments, key=lambda s: abs(s.midpoint - target_time))
+
+    def _resolve_includes(
+        self,
+        zones: list[tuple[float, float, BeatInfo, BeatInfo]],
+        segments: list[VideoSegment],
+    ) -> tuple[dict[int, VideoSegment], dict[int, float]]:
+        """Map user-specified must-include timestamps to their zone's segment.
+
+        Returns (include_map, include_anchors) where anchors map zone index
+        to the timestamp that must be contained in the extracted clip.
+        """
+        include_map: dict[int, VideoSegment] = {}
+        include_anchors: dict[int, float] = {}
+        for ts in self.config.include_timestamps:
+            # Find which zone contains this timestamp
+            for idx, (zone_start, zone_end, _, _) in enumerate(zones):
+                if zone_start <= ts < zone_end:
+                    seg = self._find_segment_at(segments, ts)
+                    if seg is not None:
+                        include_map[idx] = seg
+                        include_anchors[idx] = ts
+                    break
+        return include_map, include_anchors
+
+    def _find_segment_at(
+        self, segments: list[VideoSegment], timestamp: float
+    ) -> VideoSegment | None:
         """Find the segment that contains the given timestamp."""
         for seg in segments:
             if seg.start_time <= timestamp <= seg.end_time:
                 return seg
-        # If exact match not found, find nearest
         if segments:
             return min(segments, key=lambda s: abs(s.midpoint - timestamp))
         return None
 
-    def _find_best_segment(
-        self,
-        segments: list[VideoSegment],
-        needed_duration: float,
-        used_midpoints: list[float],
-        beat_start: BeatInfo,
-    ) -> VideoSegment | None:
-        """Score each candidate segment for this beat interval and return the best."""
-        candidates: list[tuple[VideoSegment, float]] = []
-
-        for seg in segments:
-            if seg.duration < needed_duration * 0.5:
-                continue
-
-            interest = seg.interest.composite
-            diversity = self._diversity_score(seg.midpoint, used_midpoints)
-            transition_bonus = 0.1 if seg.scene_boundary_near else 0.0
-            energy_match = beat_start.strength * interest
-
-            if self.config.segment_preference == SegmentPreference.BALANCED:
-                score = (
-                    interest * 0.4
-                    + diversity * self.config.diversity_weight
-                    + energy_match * 0.2
-                    + transition_bonus
-                )
-            elif self.config.segment_preference == SegmentPreference.HIGH_ACTION:
-                score = interest * 0.8 + energy_match * 0.2
-            else:  # CHRONOLOGICAL
-                chrono = self._chronological_score(seg, used_midpoints)
-                score = interest * 0.3 + chrono * 0.5 + diversity * 0.2
-
-            candidates.append((seg, score))
-
-        if not candidates:
-            return None
-        candidates.sort(key=lambda x: x[1], reverse=True)
-        return candidates[0][0]
-
-    def _diversity_score(self, midpoint: float, used_midpoints: list[float]) -> float:
-        """Score 0-1 where 1 = maximally distant from all used segments."""
-        if not used_midpoints:
-            return 1.0
-        min_dist = min(abs(midpoint - u) for u in used_midpoints)
-        return min(1.0, min_dist / 60.0)
-
-    def _chronological_score(self, seg: VideoSegment, used_midpoints: list[float]) -> float:
-        """Score how well this segment follows chronologically from the last used one."""
-        if not used_midpoints:
-            return 1.0
-        last = used_midpoints[-1]
-        if seg.midpoint > last:
-            return min(1.0, 1.0 / (1.0 + abs(seg.midpoint - last - 10.0)))
-        return 0.0
-
     def _align_segment(
-        self, segment: VideoSegment, needed_duration: float
+        self,
+        segment: VideoSegment,
+        needed_duration: float,
+        anchor: float | None = None,
     ) -> tuple[float, float]:
-        """Extract exactly needed_duration centered within the segment."""
+        """Extract exactly needed_duration from the segment.
+
+        If anchor is provided, center the extraction around that timestamp
+        (ensuring the anchor is contained). Otherwise, center within the segment.
+        """
         available = segment.duration
         if needed_duration >= available:
             return segment.start_time, segment.end_time
+
+        if anchor is not None:
+            # Center around the anchor timestamp
+            start = anchor - needed_duration / 2
+            end = anchor + needed_duration / 2
+            # Clamp to segment boundaries
+            if start < segment.start_time:
+                start = segment.start_time
+                end = start + needed_duration
+            if end > segment.end_time:
+                end = segment.end_time
+                start = end - needed_duration
+            return max(start, segment.start_time), min(end, segment.end_time)
+
+        # Default: center within the segment
         excess = available - needed_duration
         start = segment.start_time + excess / 2
         end = start + needed_duration
         return start, end
 
-    def _fallback_segment(
-        self,
-        segments: list[VideoSegment],
-        needed_duration: float,
-        used_midpoints: list[float],
-    ) -> VideoSegment:
-        """Pick the best unused segment when no ideal candidate was found."""
-        # Sort by composite interest descending
-        sorted_segs = sorted(segments, key=lambda s: s.interest.composite, reverse=True)
-        for seg in sorted_segs:
-            if seg.duration >= needed_duration * 0.3:
-                return seg
-        return sorted_segs[0]
+    def _merge_continuous(self, decisions: list[EditDecision]) -> list[EditDecision]:
+        """Merge consecutive decisions whose source positions are adjacent.
+
+        Consecutive zone decisions that pick from nearby source positions
+        (gap < segment_window) get merged into a single longer clip.
+        This eliminates unnecessary cuts within continuous stretches of video.
+        """
+        if len(decisions) <= 1:
+            return decisions
+
+        threshold = self.config.segment_window
+        merged: list[EditDecision] = []
+        group_start = decisions[0]
+        group_target_end = decisions[0].target_end
+
+        for i in range(1, len(decisions)):
+            prev = decisions[i - 1]
+            curr = decisions[i]
+            gap = curr.source_start - prev.source_end
+
+            if gap < threshold:
+                # Adjacent — extend current group
+                group_target_end = curr.target_end
+            else:
+                # Scene change — finalize current group, start new one
+                total_dur = group_target_end - group_start.target_start
+                merged.append(EditDecision(
+                    beat_index=group_start.beat_index,
+                    source_start=group_start.source_start,
+                    source_end=group_start.source_start + total_dur,
+                    target_start=group_start.target_start,
+                    target_end=group_target_end,
+                    interest_score=group_start.interest_score,
+                ))
+                group_start = curr
+                group_target_end = curr.target_end
+
+        # Finalize last group
+        total_dur = group_target_end - group_start.target_start
+        merged.append(EditDecision(
+            beat_index=group_start.beat_index,
+            source_start=group_start.source_start,
+            source_end=group_start.source_start + total_dur,
+            target_start=group_start.target_start,
+            target_end=group_target_end,
+            interest_score=group_start.interest_score,
+        ))
+        return merged

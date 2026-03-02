@@ -4,7 +4,7 @@ from typing import Optional
 import typer
 from rich.console import Console
 
-from smartcut.config import SegmentPreference, SmartCutConfig, TransitionStyle
+from smartcut.config import SmartCutConfig, TransitionStyle
 from smartcut.pipeline import SmartCutPipeline
 
 app = typer.Typer(
@@ -25,14 +25,14 @@ def cut(
     transition: TransitionStyle = typer.Option(
         TransitionStyle.HARD_CUT, "-t", "--transition", help="Transition style between cuts"
     ),
-    preference: SegmentPreference = typer.Option(
-        SegmentPreference.BALANCED, "-p", "--preference", help="Segment selection preference"
-    ),
     include: Optional[list[float]] = typer.Option(
         None, "-i", "--include", help="Must-include video timestamps in seconds (repeatable)"
     ),
     analysis_fps: float = typer.Option(
         3.0, "--analysis-fps", help="FPS for video analysis sampling"
+    ),
+    segment_hop: float = typer.Option(
+        0.5, "--segment-hop", help="Hop between overlapping analysis windows in seconds"
     ),
     crossfade_duration: float = typer.Option(
         0.08, "--crossfade", help="Crossfade duration in seconds"
@@ -43,7 +43,7 @@ def cut(
     max_segment: float = typer.Option(
         8.0, "--max-segment", help="Maximum segment duration in seconds"
     ),
-    output_fps: int = typer.Option(30, "--fps", help="Output video FPS"),
+    output_fps: float = typer.Option(0, "--fps", help="Output video FPS (0 = match source video)"),
     preset: str = typer.Option(
         "medium", "--preset", help="ffmpeg encoding preset (ultrafast..veryslow)"
     ),
@@ -54,9 +54,9 @@ def cut(
         audio_path=audio,
         output_path=output,
         transition_style=transition,
-        segment_preference=preference,
         include_timestamps=include or [],
         analysis_fps=analysis_fps,
+        segment_hop=segment_hop,
         crossfade_duration=crossfade_duration,
         min_segment_duration=min_segment,
         max_segment_duration=max_segment,

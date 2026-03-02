@@ -14,39 +14,44 @@ from smartcut.video.scorers import (
 
 
 class VideoAnalyzer:
-    """Analyze video for visual interest scoring."""
+    """Analyze video for visual interest scoring using overlapping windows."""
 
     def __init__(self, config: SmartCutConfig):
         self.config = config
+        self.source_fps: float = 30.0
 
     def analyze(self) -> list[VideoSegment]:
-        """Analyze entire video, return scored segments."""
+        """Analyze entire video, return scored segments with overlapping windows."""
         # Step 1: Detect scene boundaries
         boundary_detector = SceneBoundaryDetector(self.config)
         boundaries = boundary_detector.detect_boundaries()
 
-        # Step 2: Sample frames and score windows
+        # Step 2: Score all sampled frames into a flat list
+        frame_data = self._score_frames()
+        if not frame_data:
+            return []
+
+        video_duration = frame_data[-1][0] + (1.0 / self.config.analysis_fps)
+
+        # Step 3: Build overlapping windows from frame_data
+        segments = self._build_overlapping_windows(frame_data, video_duration, boundaries)
+
+        return self._normalize_segments(segments)
+
+    def _score_frames(self) -> list[tuple[float, dict[str, float]]]:
+        """Pass 1: iterate frames, score each sampled frame into a flat list."""
         cap = cv2.VideoCapture(str(self.config.video_path))
         if not cap.isOpened():
             raise RuntimeError(f"Cannot open video: {self.config.video_path}")
 
         fps = cap.get(cv2.CAP_PROP_FPS)
+        self.source_fps = fps or 30.0
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        video_duration = total_frames / fps
-
         sample_interval = max(1, int(fps / self.config.analysis_fps))
 
-        segments: list[VideoSegment] = []
+        frame_data: list[tuple[float, dict[str, float]]] = []
         prev_gray: np.ndarray | None = None
         prev_frame: np.ndarray | None = None
-
-        window_scores: dict[str, list[float]] = {
-            "optical_flow": [],
-            "color_change": [],
-            "edge_variance": [],
-            "brightness_change": [],
-        }
-        window_start_time = 0.0
         frame_idx = 0
 
         with Progress(
@@ -56,7 +61,7 @@ class VideoAnalyzer:
             TextColumn("{task.percentage:>3.0f}%"),
             TimeRemainingColumn(),
         ) as progress:
-            task = progress.add_task("Analyzing video frames", total=total_frames)
+            task = progress.add_task("Scoring video frames", total=total_frames)
 
             while True:
                 ret, frame = cap.read()
@@ -70,47 +75,66 @@ class VideoAnalyzer:
                     continue
 
                 current_time = frame_idx / fps
-
-                # Downsample for performance
                 frame_small = cv2.resize(frame, (640, 360))
                 gray_small = cv2.cvtColor(frame_small, cv2.COLOR_BGR2GRAY)
 
+                scores: dict[str, float] = {}
                 if prev_gray is not None:
-                    window_scores["optical_flow"].append(
-                        score_optical_flow(prev_gray, gray_small)
+                    scores["optical_flow"] = score_optical_flow(prev_gray, gray_small)
+                    scores["color_change"] = score_color_histogram_change(
+                        prev_frame, frame_small
                     )
-                    window_scores["color_change"].append(
-                        score_color_histogram_change(prev_frame, frame_small)
-                    )
-                    window_scores["brightness_change"].append(
-                        score_brightness_change(prev_gray, gray_small)
-                    )
-                window_scores["edge_variance"].append(score_edge_variance(gray_small))
+                    scores["brightness_change"] = score_brightness_change(prev_gray, gray_small)
+                scores["edge_variance"] = score_edge_variance(gray_small)
 
-                # Check if window is complete
-                if current_time - window_start_time >= self.config.segment_window:
-                    segment = self._finalize_window(
-                        window_start_time, current_time, window_scores, boundaries
-                    )
-                    segments.append(segment)
-                    window_start_time = current_time
-                    window_scores = {k: [] for k in window_scores}
-
+                frame_data.append((current_time, scores))
                 prev_gray = gray_small
                 prev_frame = frame_small
                 frame_idx += 1
 
         cap.release()
+        return frame_data
 
-        # Finalize last partial window
-        if any(window_scores.values()):
-            final_time = total_frames / fps
-            segment = self._finalize_window(
-                window_start_time, final_time, window_scores, boundaries
-            )
-            segments.append(segment)
+    def _build_overlapping_windows(
+        self,
+        frame_data: list[tuple[float, dict[str, float]]],
+        video_duration: float,
+        boundaries: list[float],
+    ) -> list[VideoSegment]:
+        """Pass 2: build overlapping windows at segment_hop intervals."""
+        hop = self.config.segment_hop
+        window = self.config.segment_window
+        segments: list[VideoSegment] = []
 
-        return self._normalize_segments(segments)
+        window_start = 0.0
+        while window_start < video_duration:
+            window_end = min(window_start + window, video_duration)
+
+            # Gather frame scores within this window
+            window_scores: dict[str, list[float]] = {
+                "optical_flow": [],
+                "color_change": [],
+                "edge_variance": [],
+                "brightness_change": [],
+            }
+            for t, scores in frame_data:
+                if t < window_start:
+                    continue
+                if t >= window_end:
+                    break
+                for key in window_scores:
+                    if key in scores:
+                        window_scores[key].append(scores[key])
+
+            if any(window_scores.values()):
+                segment = self._finalize_window(
+                    window_start, window_end, window_scores, boundaries
+                )
+                segments.append(segment)
+
+            window_start += hop
+
+        return segments
 
     def _finalize_window(
         self,

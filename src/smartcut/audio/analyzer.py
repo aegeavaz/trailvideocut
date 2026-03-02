@@ -17,8 +17,8 @@ class AudioAnalyzer:
         tempo, beat_frames = self._detect_beats(y, sr)
         onset_env = self._compute_onset_envelope(y, sr)
         beats = self._build_beat_list(beat_frames, onset_env, sr)
-        beats = self._filter_beats(beats)
         duration = librosa.get_duration(y=y, sr=sr)
+        beats = self._filter_beats(beats, duration)
         return AudioAnalysis(
             duration=duration,
             tempo=tempo,
@@ -63,7 +63,7 @@ class AudioAnalyzer:
             beats.append(BeatInfo(timestamp=float(t), strength=float(s), is_downbeat=is_downbeat))
         return beats
 
-    def _filter_beats(self, beats: list[BeatInfo]) -> list[BeatInfo]:
+    def _filter_beats(self, beats: list[BeatInfo], duration: float | None = None) -> list[BeatInfo]:
         """Handle edge cases: very fast or very slow tempos."""
         if not beats:
             return beats
@@ -93,4 +93,11 @@ class AudioAnalyzer:
                     )
 
             filtered.append(beats[i])
+
+        # Ensure beats cover the full song duration
+        if filtered and duration is not None and duration - filtered[-1].timestamp > min_dur:
+            filtered.append(
+                BeatInfo(timestamp=duration, strength=0.3, is_downbeat=False)
+            )
+
         return filtered

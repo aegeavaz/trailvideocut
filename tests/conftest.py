@@ -32,9 +32,10 @@ def sample_audio_analysis(sample_beats) -> AudioAnalysis:
 
 @pytest.fixture
 def sample_segments() -> list[VideoSegment]:
-    """Generate 20 video segments (1s each) with varying interest scores."""
+    """Generate 40 overlapping video segments (2s window, 0.5s hop) over 20s."""
     segments = []
-    for i in range(20):
+    t = 0.0
+    while t < 20.0:
         interest = InterestScore(
             optical_flow=np.random.rand(),
             color_change=np.random.rand(),
@@ -43,10 +44,11 @@ def sample_segments() -> list[VideoSegment]:
         )
         segments.append(
             VideoSegment(
-                start_time=float(i),
-                end_time=float(i + 1),
+                start_time=t,
+                end_time=min(t + 2.0, 20.0),
                 interest=interest,
-                scene_boundary_near=(i % 5 == 0),
+                scene_boundary_near=(int(t) % 5 == 0),
             )
         )
+        t += 0.5
     return segments

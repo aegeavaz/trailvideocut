@@ -1,3 +1,5 @@
+from fractions import Fraction
+
 from rich.console import Console
 
 from smartcut.audio.analyzer import AudioAnalyzer
@@ -46,6 +48,12 @@ class SmartCutPipeline:
         segments = video_analyzer.analyze()
         console.print(f"  {len(segments)} segments scored")
 
+        # Resolve auto-detect FPS from source video
+        if self.config.output_fps == 0:
+            self.config.output_fps = video_analyzer.source_fps
+            frac = Fraction(self.config.output_fps).limit_denominator(100000)
+            console.print(f"  Using source video FPS: {frac.numerator}/{frac.denominator} ({self.config.output_fps:.6f})")
+
         # Show top 5 most interesting segments
         top_segments = sorted(segments, key=lambda s: s.interest.composite, reverse=True)[:5]
         for seg in top_segments:
@@ -59,7 +67,8 @@ class SmartCutPipeline:
         selector = SegmentSelector(self.config)
         cut_plan = selector.select(audio_analysis, segments)
         console.print(
-            f"  {len(cut_plan.decisions)} cuts planned, "
+            f"  {cut_plan.zones_analyzed} zones analyzed, "
+            f"merged to {len(cut_plan.decisions)} continuous clips, "
             f"total duration: {cut_plan.total_duration:.1f}s"
         )
 

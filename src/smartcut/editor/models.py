@@ -22,3 +22,4 @@ class CutPlan:
     song_tempo: float
     transition_style: str
     crossfade_duration: float = 0.08
+    zones_analyzed: int = 0

@@ -8,12 +8,6 @@ class TransitionStyle(str, Enum):
     CROSSFADE = "crossfade"
 
 
-class SegmentPreference(str, Enum):
-    BALANCED = "balanced"
-    HIGH_ACTION = "high_action"
-    CHRONOLOGICAL = "chronological"
-
-
 @dataclass
 class SmartCutConfig:
     """Global configuration for a SmartCut run."""
@@ -25,6 +19,7 @@ class SmartCutConfig:
     # Video analysis
     analysis_fps: float = 3.0
     segment_window: float = 2.0
+    segment_hop: float = 0.5
     scene_detect_threshold: float = 20.0
 
     # Audio analysis
@@ -33,14 +28,12 @@ class SmartCutConfig:
     # Segment selection
     transition_style: TransitionStyle = TransitionStyle.HARD_CUT
     crossfade_duration: float = 0.08
-    segment_preference: SegmentPreference = SegmentPreference.BALANCED
-    diversity_weight: float = 0.3
     min_segment_duration: float = 0.25
     max_segment_duration: float = 8.0
     include_timestamps: list[float] = field(default_factory=list)
 
     # Output
-    output_fps: int = 30
+    output_fps: float = 0
     output_codec: str = "libx264"
     output_audio_codec: str = "aac"
     output_preset: str = "medium"
