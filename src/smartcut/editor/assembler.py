@@ -7,8 +7,22 @@ from moviepy import VideoFileClip, AudioFileClip, concatenate_videoclips
 
 from smartcut.config import SmartCutConfig, TransitionStyle
 from smartcut.editor.models import CutPlan
+from smartcut.gpu import configure_moviepy_ffmpeg, get_encoder_codec, patch_nvenc_pixel_format
 
 console = Console()
+
+# Map x264 presets to NVENC preset equivalents
+_NVENC_PRESET_MAP = {
+    "ultrafast": "p1",
+    "superfast": "p2",
+    "veryfast": "p3",
+    "faster": "p4",
+    "fast": "p4",
+    "medium": "p5",
+    "slow": "p6",
+    "slower": "p7",
+    "veryslow": "p7",
+}
 
 
 class VideoAssembler:
@@ -54,17 +68,48 @@ class VideoAssembler:
             trimmed_audio = audio_clip.subclipped(0, song_duration)
             final_video = final_video.with_audio(trimmed_audio)
 
-            console.print(f"  Exporting to {self.config.output_path}...")
+            # Select encoder: NVENC when GPU available + use_gpu, else libx264
+            codec = get_encoder_codec(force_cpu=not self.config.use_gpu)
+            is_nvenc = codec == "h264_nvenc"
+
+            # Switch moviepy to system ffmpeg (the bundled one lacks NVENC)
+            # and fix the yuva420p pixel format that moviepy hardcodes
+            if is_nvenc:
+                configure_moviepy_ffmpeg()
+                patch_nvenc_pixel_format()
+
+            if is_nvenc:
+                nvenc_preset = _NVENC_PRESET_MAP.get(self.config.output_preset, "p5")
+                console.print(
+                    f"  Exporting to {self.config.output_path} "
+                    f"(NVENC, preset {nvenc_preset})..."
+                )
+            else:
+                console.print(f"  Exporting to {self.config.output_path} (libx264)...")
+
             frac = Fraction(self.config.output_fps).limit_denominator(100000)
             fps_rational = f"{frac.numerator}/{frac.denominator}"
+
+            ffmpeg_params = ["-r", fps_rational]
+            preset = self.config.output_preset
+
+            if is_nvenc:
+                nvenc_preset = _NVENC_PRESET_MAP.get(self.config.output_preset, "p5")
+                preset = nvenc_preset
+                # -pix_fmt yuv420p overrides moviepy's hardcoded yuva420p
+                # (last -pix_fmt wins in ffmpeg)
+                ffmpeg_params.extend([
+                    "-rc", "vbr", "-cq", "23", "-pix_fmt", "yuv420p",
+                ])
+
             final_video.write_videofile(
                 str(self.config.output_path),
                 fps=self.config.output_fps,
-                codec=self.config.output_codec,
+                codec=codec,
                 audio_codec=self.config.output_audio_codec,
-                preset=self.config.output_preset,
+                preset=preset,
                 threads=self._get_threads(),
-                ffmpeg_params=["-r", fps_rational],
+                ffmpeg_params=ffmpeg_params,
                 logger="bar",
             )
         finally:

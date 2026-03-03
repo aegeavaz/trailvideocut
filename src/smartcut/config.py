@@ -32,6 +32,10 @@ class SmartCutConfig:
     max_segment_duration: float = 8.0
     include_timestamps: list[float] = field(default_factory=list)
 
+    # GPU acceleration
+    use_gpu: bool = True
+    gpu_batch_size: int = 64
+
     # Output
     output_fps: float = 0
     output_codec: str = "libx264"

@@ -9,6 +9,7 @@ from smartcut.audio.structure import MusicalStructureAnalyzer
 from smartcut.config import SmartCutConfig
 from smartcut.editor.assembler import VideoAssembler
 from smartcut.editor.selector import SegmentSelector
+from smartcut.gpu import detect_gpu
 from smartcut.video.analyzer import VideoAnalyzer
 from smartcut.video.models import VideoSegment
 
@@ -24,6 +25,23 @@ class SmartCutPipeline:
     def run(self) -> None:
         """Execute the full pipeline."""
         self._validate_inputs()
+
+        # Log GPU capabilities
+        if self.config.use_gpu:
+            caps = detect_gpu()
+            if caps.any_gpu:
+                mode_parts = []
+                if caps.cupy_available:
+                    mode_parts.append("CuPy scoring")
+                if caps.nvdec_available:
+                    mode_parts.append("NVDEC decoding")
+                if caps.nvenc_available:
+                    mode_parts.append("NVENC encoding")
+                console.print(f"  GPU acceleration: {', '.join(mode_parts)}")
+            else:
+                console.print("  [yellow]GPU requested but not available — using CPU[/]")
+        else:
+            console.print("  GPU acceleration: disabled")
 
         # Run audio and video analysis concurrently — they are fully independent
         with ThreadPoolExecutor(max_workers=2) as executor:

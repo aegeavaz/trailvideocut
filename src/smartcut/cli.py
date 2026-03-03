@@ -5,6 +5,7 @@ import typer
 from rich.console import Console
 
 from smartcut.config import SmartCutConfig, TransitionStyle
+from smartcut.gpu import detect_gpu
 from smartcut.pipeline import SmartCutPipeline
 
 app = typer.Typer(
@@ -50,6 +51,10 @@ def cut(
     threads: int = typer.Option(
         0, "--threads", help="FFmpeg encoding threads (0 = auto-detect)"
     ),
+    gpu: bool = typer.Option(True, "--gpu/--no-gpu", help="Enable/disable GPU acceleration"),
+    gpu_batch_size: int = typer.Option(
+        64, "--gpu-batch-size", help="Frames per GPU batch for scoring"
+    ),
 ):
     """Cut a motorcycle POV video to sync with a song's beats."""
     config = SmartCutConfig(
@@ -66,6 +71,8 @@ def cut(
         output_fps=output_fps,
         output_preset=preset,
         output_threads=threads,
+        use_gpu=gpu,
+        gpu_batch_size=gpu_batch_size,
     )
 
     console.print("[bold]SmartCut[/] - Beat-synced video editor")
@@ -74,6 +81,22 @@ def cut(
     console.print(f"  Output: {output}")
     if include:
         console.print(f"  Must-include: {include}")
+
+    # GPU status
+    if gpu:
+        caps = detect_gpu()
+        if caps.gpu_name:
+            console.print(f"  GPU: {caps.gpu_name} ({caps.gpu_memory_mb} MB)")
+        console.print(
+            f"  CuPy: {'[green]yes[/]' if caps.cupy_available else '[yellow]no[/]'} | "
+            f"NVDEC: {'[green]yes[/]' if caps.nvdec_available else '[yellow]no[/]'} | "
+            f"NVENC: {'[green]yes[/]' if caps.nvenc_available else '[yellow]no[/]'}"
+        )
+        if not caps.any_gpu:
+            console.print("  [yellow]No GPU features detected — falling back to CPU[/]")
+    else:
+        console.print("  GPU: [dim]disabled (--no-gpu)[/]")
+
     console.print()
 
     try:
