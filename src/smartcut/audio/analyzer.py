@@ -72,6 +72,10 @@ class AudioAnalyzer:
         min_dur = self.config.min_segment_duration
         max_dur = self.config.max_segment_duration
 
+        # Ensure coverage starts at time 0
+        if beats[0].timestamp > min_dur:
+            beats = [BeatInfo(timestamp=0.0, strength=0.3, is_downbeat=False)] + beats
+
         filtered = [beats[0]]
         for i in range(1, len(beats)):
             gap = beats[i].timestamp - filtered[-1].timestamp
@@ -97,6 +101,16 @@ class AudioAnalyzer:
 
         # Ensure beats cover the full song duration
         if filtered and duration is not None and duration - filtered[-1].timestamp > min_dur:
+            gap = duration - filtered[-1].timestamp
+            if gap > max_dur:
+                n_sub = int(np.ceil(gap / max_dur))
+                sub_interval = gap / n_sub
+                base_t = filtered[-1].timestamp
+                for j in range(1, n_sub):
+                    synthetic_t = base_t + j * sub_interval
+                    filtered.append(
+                        BeatInfo(timestamp=synthetic_t, strength=0.3, is_downbeat=False)
+                    )
             filtered.append(
                 BeatInfo(timestamp=duration, strength=0.3, is_downbeat=False)
             )

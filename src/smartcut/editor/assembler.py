@@ -3,7 +3,10 @@ from fractions import Fraction
 
 from rich.console import Console
 
-from moviepy import VideoFileClip, AudioFileClip, concatenate_videoclips
+from moviepy import VideoFileClip, AudioFileClip, ImageClip, concatenate_videoclips
+from moviepy.video.fx.CrossFadeIn import CrossFadeIn
+from moviepy.video.fx.FadeOut import FadeOut
+from moviepy.audio.fx.AudioFadeOut import AudioFadeOut
 
 from smartcut.config import SmartCutConfig, TransitionStyle
 from smartcut.editor.models import CutPlan
@@ -56,16 +59,31 @@ class VideoAssembler:
 
             if plan.transition_style == TransitionStyle.CROSSFADE.value and len(subclips) > 1:
                 for i in range(1, len(subclips)):
-                    subclips[i] = subclips[i].crossfadein(plan.crossfade_duration)
+                    subclips[i] = subclips[i].with_effects([CrossFadeIn(plan.crossfade_duration)])
                 final_video = concatenate_videoclips(
-                    subclips, padding=-plan.crossfade_duration
+                    subclips, method="compose", padding=-plan.crossfade_duration
                 )
             else:
                 final_video = concatenate_videoclips(subclips)
 
-            # Replace audio with the song
-            song_duration = min(audio_clip.duration, final_video.duration)
-            trimmed_audio = audio_clip.subclipped(0, song_duration)
+            # Match video duration to full song length
+            audio_duration = audio_clip.duration
+
+            if final_video.duration < audio_duration:
+                deficit = audio_duration - final_video.duration
+                console.print(f"  Extending video by {deficit:.1f}s to match song duration...")
+                last_frame = final_video.get_frame(final_video.duration - 0.01)
+                freeze = ImageClip(last_frame, duration=deficit)
+                final_video = concatenate_videoclips([final_video, freeze])
+
+            # Trim to exact audio duration (handles video > audio case)
+            final_video = final_video.subclipped(0, audio_duration)
+
+            # Smooth fade-out ending (video fades to black, audio fades to silence)
+            fade_dur = min(2.0, audio_duration * 0.1)
+            final_video = final_video.with_effects([FadeOut(fade_dur)])
+            trimmed_audio = audio_clip.subclipped(0, audio_duration)
+            trimmed_audio = trimmed_audio.with_effects([AudioFadeOut(fade_dur)])
             final_video = final_video.with_audio(trimmed_audio)
 
             # Select encoder: NVENC when GPU available + use_gpu, else libx264
@@ -118,10 +136,17 @@ class VideoAssembler:
 
     def _extract_subclips(self, source_clip: VideoFileClip, plan: CutPlan) -> list:
         """Extract subclips from the source video based on edit decisions."""
+        use_crossfade = (
+            plan.transition_style == TransitionStyle.CROSSFADE.value
+            and len(plan.decisions) > 1
+        )
         subclips = []
-        for decision in plan.decisions:
+        for i, decision in enumerate(plan.decisions):
             start = max(0, decision.source_start)
             end = min(source_clip.duration, decision.source_end)
+            # Extend non-last clips to compensate for crossfade overlap
+            if use_crossfade and i < len(plan.decisions) - 1:
+                end = min(source_clip.duration, end + plan.crossfade_duration)
             if end - start < 0.05:
                 continue
             sub = source_clip.subclipped(start, end)

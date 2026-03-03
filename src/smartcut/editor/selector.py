@@ -84,7 +84,7 @@ class SegmentSelector:
 
         return CutPlan(
             decisions=merged,
-            total_duration=beats[-1].timestamp - beats[0].timestamp,
+            total_duration=audio.duration,
             song_tempo=audio.tempo,
             transition_style=self.config.transition_style.value,
             crossfade_duration=self.config.crossfade_duration,
