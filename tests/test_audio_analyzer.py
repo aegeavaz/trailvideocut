@@ -18,7 +18,7 @@ class TestBeatFiltering:
         return AudioAnalyzer(config)
 
     def test_filters_beats_too_close(self):
-        analyzer = self._make_analyzer(min_segment_duration=0.25)
+        analyzer = self._make_analyzer(beat_proximity_threshold=0.25)
         beats = [
             BeatInfo(timestamp=0.0, strength=0.5, is_downbeat=True),
             BeatInfo(timestamp=0.1, strength=0.3, is_downbeat=False),  # too close, skip
@@ -30,7 +30,7 @@ class TestBeatFiltering:
         assert filtered[1].timestamp == 0.5
 
     def test_replaces_with_stronger_downbeat(self):
-        analyzer = self._make_analyzer(min_segment_duration=0.25)
+        analyzer = self._make_analyzer(beat_proximity_threshold=0.25)
         beats = [
             BeatInfo(timestamp=0.0, strength=0.3, is_downbeat=False),
             BeatInfo(timestamp=0.1, strength=0.9, is_downbeat=True),  # stronger, replaces

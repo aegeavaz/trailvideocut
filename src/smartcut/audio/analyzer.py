@@ -69,7 +69,7 @@ class AudioAnalyzer:
         if not beats:
             return beats
 
-        min_dur = self.config.min_segment_duration
+        min_dur = self.config.beat_proximity_threshold
         max_dur = self.config.max_segment_duration
 
         # Ensure coverage starts at time 0

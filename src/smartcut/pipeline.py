@@ -1,3 +1,4 @@
+import time
 from concurrent.futures import ThreadPoolExecutor
 from fractions import Fraction
 
@@ -8,6 +9,7 @@ from smartcut.audio.models import AudioAnalysis
 from smartcut.audio.structure import MusicalStructureAnalyzer
 from smartcut.config import SmartCutConfig
 from smartcut.editor.assembler import VideoAssembler
+from smartcut.editor.cut_points import energy_to_density, select_cut_points
 from smartcut.editor.selector import SegmentSelector
 from smartcut.gpu import detect_gpu
 from smartcut.video.analyzer import VideoAnalyzer
@@ -53,7 +55,7 @@ class SmartCutPipeline:
             segments, source_fps = video_future.result()
 
         # Print audio results (buffered until both phases done)
-        console.print("\n[bold blue]Phase 1/4:[/] Audio analysis complete")
+        console.print("\n[bold blue]Phase 1/5:[/] Audio analysis complete")
         console.print(
             f"  Tempo: {audio_analysis.tempo:.1f} BPM, "
             f"{len(audio_analysis.beats)} beats detected, "
@@ -66,7 +68,7 @@ class SmartCutPipeline:
             )
 
         # Print video results
-        console.print(f"\n[bold blue]Phase 2/4:[/] Video analysis complete")
+        console.print(f"\n[bold blue]Phase 2/5:[/] Video analysis complete")
         console.print(f"  {len(segments)} segments scored")
 
         # Resolve auto-detect FPS from source video
@@ -83,21 +85,68 @@ class SmartCutPipeline:
                 f"(score: {seg.interest.composite:.3f})"
             )
 
-        # Phase 3: Segment selection
-        console.print("\n[bold blue]Phase 3/4:[/] Selecting best segments...")
-        selector = SegmentSelector(self.config)
-        cut_plan = selector.select(audio_analysis, segments)
-        console.print(
-            f"  {cut_plan.zones_analyzed} zones analyzed, "
-            f"merged to {len(cut_plan.decisions)} continuous clips, "
-            f"total duration: {cut_plan.total_duration:.1f}s"
+        # Phase 3: Energy-driven cut point selection
+        console.print("\n[bold blue]Phase 3/5:[/] Selecting cut points by energy...")
+        cut_points = select_cut_points(
+            audio_analysis.beats,
+            audio_analysis.sections,
+            audio_analysis.tempo,
+            self.config.min_segment_duration,
+            self.config.max_segment_duration,
         )
+        console.print(
+            f"  {len(audio_analysis.beats)} beats -> {len(cut_points)} cut points"
+        )
+        for s in audio_analysis.sections:
+            section_cuts = sum(
+                1 for cp in cut_points
+                if s.start_time <= cp.timestamp < s.end_time
+            )
+            density = energy_to_density(
+                s.energy, audio_analysis.tempo,
+                self.config.min_segment_duration, self.config.max_segment_duration,
+            )
+            interval = 1.0 / density if density > 0 else float('inf')
+            effective_interval = max(interval, self.config.min_segment_duration)
+            console.print(
+                f"  [{s.label:8s}] energy={s.energy:.2f}, "
+                f"interval={effective_interval:.1f}s, {section_cuts} cuts"
+            )
 
-        # Phase 4: Assembly
-        console.print("\n[bold blue]Phase 4/4:[/] Assembling final video...")
+        # Phase 4: Segment selection
+        console.print("\n[bold blue]Phase 4/5:[/] Selecting best segments...")
+        selector = SegmentSelector(self.config)
+        cut_plan = selector.select(audio_analysis, segments, cut_points=cut_points)
+        n_intervals = len(cut_points) - 1
+        console.print(
+            f"  {n_intervals} beat intervals, "
+            f"{cut_plan.clips_selected} clips selected (CV: {cut_plan.score_cv:.3f}), "
+            f"merged to {len(cut_plan.decisions)} continuous clips"
+        )
+        if cut_plan.clips_selected < n_intervals:
+            console.print(
+                f"  [yellow]Quality-adaptive: reduced from {n_intervals} to "
+                f"{cut_plan.clips_selected} clips (uniform footage)[/]"
+            )
+        for i, d in enumerate(cut_plan.decisions):
+            duration = d.source_end - d.source_start
+            console.print(
+                f"  Clip {i+1:3d}: {d.source_start:6.1f}s - {d.source_end:6.1f}s "
+                f"(dur: {duration:.1f}s, score: {d.interest_score:.3f})"
+            )
+
+        # Phase 5: Assembly
+        console.print("\n[bold blue]Phase 5/5:[/] Assembling final video...")
         assembler = VideoAssembler(self.config)
+        t0 = time.time()
         assembler.assemble(cut_plan)
+        assembly_elapsed = time.time() - t0
         console.print(f"\n[bold green]Done![/] Output saved to: {self.config.output_path}")
+        minutes, secs = divmod(assembly_elapsed, 60)
+        if minutes >= 1:
+            console.print(f"  Assembly time: {int(minutes)}m {secs:.1f}s")
+        else:
+            console.print(f"  Assembly time: {secs:.1f}s")
 
     def _run_audio_analysis(self) -> AudioAnalysis:
         """Phase 1 + 1b: Analyze audio beats and musical structure."""
@@ -106,7 +155,9 @@ class SmartCutPipeline:
 
         structure_analyzer = MusicalStructureAnalyzer()
         audio_analysis.sections = structure_analyzer.analyze(
-            str(self.config.audio_path), y=audio_analysis.raw_audio
+            str(self.config.audio_path),
+            y=audio_analysis.raw_audio,
+            onset_envelope=audio_analysis.onset_envelope,
         )
 
         return audio_analysis

@@ -1,0 +1,216 @@
+import pytest
+
+from smartcut.audio.models import BeatInfo, MusicSection
+from smartcut.editor.cut_points import (
+    energy_to_density,
+    select_cut_points,
+    select_cut_points_for_section,
+)
+
+
+def _make_beats(n: int, interval: float = 0.5, start: float = 0.0) -> list[BeatInfo]:
+    return [
+        BeatInfo(
+            timestamp=start + i * interval,
+            strength=0.8 if i % 4 == 0 else 0.5,
+            is_downbeat=i % 4 == 0,
+        )
+        for i in range(n)
+    ]
+
+
+class TestEnergyToDensity:
+    def test_max_energy_gives_max_density(self):
+        density = energy_to_density(energy=1.0, tempo=120.0, min_segment=0.5, max_segment=8.0)
+        # max_density = min(120/60, 1/0.5) = min(2.0, 2.0) = 2.0
+        assert density == 2.0
+
+    def test_max_density_capped_by_min_segment(self):
+        """When min_segment makes beat-rate density impossible, cap max_density."""
+        density = energy_to_density(energy=1.0, tempo=160.0, min_segment=1.0, max_segment=8.0)
+        # max_density = min(160/60, 1/1.0) = min(2.67, 1.0) = 1.0
+        assert density == 1.0
+
+    def test_zero_energy_gives_min_density(self):
+        density = energy_to_density(energy=0.0, tempo=120.0, min_segment=0.5, max_segment=8.0)
+        expected_min = 1.0 / 8.0  # 0.125
+        assert density == expected_min
+
+    def test_mid_energy_interpolates(self):
+        density = energy_to_density(energy=0.5, tempo=120.0, min_segment=0.5, max_segment=8.0)
+        min_d = 1.0 / 8.0
+        max_d = min(120.0 / 60.0, 1.0 / 0.5)  # 2.0
+        expected = min_d + (0.5 ** 3) * (max_d - min_d)
+        assert abs(density - expected) < 1e-9
+
+    def test_density_increases_with_energy(self):
+        d_low = energy_to_density(0.2, 120.0, 0.5, 8.0)
+        d_high = energy_to_density(0.8, 120.0, 0.5, 8.0)
+        assert d_high > d_low
+
+
+class TestSelectCutPointsForSection:
+    def test_empty_beats_returns_empty(self):
+        result = select_cut_points_for_section([], 2.0, 0.25, 8.0)
+        assert result == []
+
+    def test_respects_min_segment(self):
+        beats = _make_beats(20, interval=0.2)  # beats every 0.2s
+        # High density that wants every beat, but min_segment=0.5 prevents it
+        result = select_cut_points_for_section(beats, 5.0, min_segment=0.5, max_segment=8.0)
+        for i in range(1, len(result)):
+            gap = result[i].timestamp - result[i - 1].timestamp
+            assert gap >= 0.5 - 0.01, f"Gap {gap} < min_segment 0.5"
+
+    def test_respects_max_segment(self):
+        beats = _make_beats(10, interval=1.0)  # beats every 1s
+        # Very low density (one cut every 20s), but max_segment=3.0 forces more
+        result = select_cut_points_for_section(beats, 0.05, min_segment=0.25, max_segment=3.0)
+        for i in range(1, len(result)):
+            gap = result[i].timestamp - result[i - 1].timestamp
+            assert gap <= 3.0 + 0.01, f"Gap {gap} > max_segment 3.0"
+
+    def test_high_density_keeps_more_beats(self):
+        beats = _make_beats(20, interval=0.5)  # 10s of beats
+        low_cuts = select_cut_points_for_section(beats, 0.5, 0.25, 8.0)
+        high_cuts = select_cut_points_for_section(beats, 2.0, 0.25, 8.0)
+        assert len(high_cuts) > len(low_cuts)
+
+    def test_prefers_downbeats(self):
+        # Create beats where beat 0 is downbeat, 1-3 are not, 4 is downbeat
+        beats = [
+            BeatInfo(timestamp=0.0, strength=0.8, is_downbeat=True),
+            BeatInfo(timestamp=0.5, strength=0.5, is_downbeat=False),
+            BeatInfo(timestamp=1.0, strength=0.5, is_downbeat=False),
+            BeatInfo(timestamp=1.5, strength=0.5, is_downbeat=False),
+            BeatInfo(timestamp=2.0, strength=0.8, is_downbeat=True),
+            BeatInfo(timestamp=2.5, strength=0.5, is_downbeat=False),
+            BeatInfo(timestamp=3.0, strength=0.5, is_downbeat=False),
+        ]
+        # Density that wants a cut roughly every 1.5s — should prefer the downbeat at 2.0
+        result = select_cut_points_for_section(beats, 0.67, 0.25, 8.0)
+        timestamps = [b.timestamp for b in result]
+        # First cut at 0.0, second should be near 1.5 but prefer 2.0 (downbeat)
+        assert 2.0 in timestamps
+
+    def test_prefers_strong_beats_over_weak(self):
+        """A strong beat slightly after ideal time should win over a weak beat at ideal time."""
+        beats = [
+            BeatInfo(timestamp=0.0, strength=0.5, is_downbeat=True),
+            BeatInfo(timestamp=1.5, strength=0.2, is_downbeat=False),  # weak, at ideal
+            BeatInfo(timestamp=1.8, strength=0.9, is_downbeat=False),  # strong, slightly after
+            BeatInfo(timestamp=3.0, strength=0.5, is_downbeat=False),
+        ]
+        # Density ~0.67 -> interval ~1.5s, ideal_next = 1.5
+        result = select_cut_points_for_section(beats, 0.67, 0.25, 8.0)
+        timestamps = [b.timestamp for b in result]
+        # Strong beat at 1.8 should be preferred over weak beat at 1.5
+        assert 1.8 in timestamps
+        assert 1.5 not in timestamps
+
+    def test_downbeat_bonus_in_scoring(self):
+        """A moderate-strength downbeat should beat a slightly stronger non-downbeat."""
+        beats = [
+            BeatInfo(timestamp=0.0, strength=0.5, is_downbeat=True),
+            BeatInfo(timestamp=1.5, strength=0.7, is_downbeat=False),  # stronger, not downbeat
+            BeatInfo(timestamp=1.6, strength=0.6, is_downbeat=True),   # weaker, but downbeat
+            BeatInfo(timestamp=3.0, strength=0.5, is_downbeat=False),
+        ]
+        # interval ~1.5s, both candidates are near ideal_next = 1.5
+        result = select_cut_points_for_section(beats, 0.67, 0.25, 8.0)
+        timestamps = [b.timestamp for b in result]
+        # Downbeat at 1.6 should win due to 0.2 downbeat bonus
+        assert 1.6 in timestamps
+
+    def test_proximity_scoring_with_high_min_segment(self):
+        """When min_segment > target_interval, proximity scoring should still work.
+
+        Previously, ideal_next used uncapped target_interval, making proximity=0
+        for all candidates and degrading to strength-only selection.
+        """
+        # Simulate 160 BPM with beats every ~0.37s, min_segment=1.0
+        beats = _make_beats(20, interval=0.37, start=0.0)
+        # High density that would produce target_interval < min_segment
+        # effective_interval should be max(target_interval, min_segment) = 1.0
+        result = select_cut_points_for_section(
+            beats, target_density=2.7, min_segment=1.0, max_segment=8.0
+        )
+        # All gaps must respect min_segment
+        for i in range(1, len(result)):
+            gap = result[i].timestamp - result[i - 1].timestamp
+            assert gap >= 1.0 - 0.01, f"Gap {gap} < min_segment 1.0"
+        # Should still produce multiple cuts (not just first and last)
+        assert len(result) >= 3
+
+
+class TestSelectCutPoints:
+    def test_empty_beats_returns_empty(self):
+        sections = [MusicSection("verse", 0.0, 10.0, 0.5)]
+        assert select_cut_points([], sections, 120.0, 0.25, 8.0) == []
+
+    def test_empty_sections_returns_all_beats(self):
+        beats = _make_beats(10, 0.5)
+        result = select_cut_points(beats, [], 120.0, 0.25, 8.0)
+        assert result == beats
+
+    def test_high_energy_section_more_cuts_than_low(self):
+        beats = _make_beats(40, interval=0.5, start=0.0)  # 0-20s
+        sections = [
+            MusicSection("verse", 0.0, 10.0, 0.3),   # low energy
+            MusicSection("chorus", 10.0, 20.0, 0.9),  # high energy
+        ]
+        result = select_cut_points(beats, sections, 120.0, 0.25, 8.0)
+        verse_cuts = [b for b in result if b.timestamp < 10.0]
+        chorus_cuts = [b for b in result if 10.0 <= b.timestamp < 20.0]
+        assert len(chorus_cuts) > len(verse_cuts)
+
+    def test_section_boundary_no_duplicate(self):
+        beats = _make_beats(20, interval=0.5)
+        sections = [
+            MusicSection("intro", 0.0, 5.0, 0.5),
+            MusicSection("verse", 5.0, 10.0, 0.5),
+        ]
+        result = select_cut_points(beats, sections, 120.0, 0.25, 8.0)
+        timestamps = [b.timestamp for b in result]
+        # No duplicates
+        assert len(timestamps) == len(set(timestamps))
+
+    def test_section_boundary_respects_min_segment(self):
+        beats = _make_beats(20, interval=0.5)
+        sections = [
+            MusicSection("intro", 0.0, 5.0, 1.0),
+            MusicSection("verse", 5.0, 10.0, 1.0),
+        ]
+        result = select_cut_points(beats, sections, 120.0, 0.25, 8.0)
+        for i in range(1, len(result)):
+            gap = result[i].timestamp - result[i - 1].timestamp
+            assert gap >= 0.25 - 0.01
+
+    def test_ensures_final_beat(self):
+        beats = _make_beats(10, interval=1.0)  # 0-9s
+        sections = [MusicSection("verse", 0.0, 5.0, 0.5)]  # only covers first half
+        result = select_cut_points(beats, sections, 120.0, 0.25, 8.0)
+        # Should have the last beat
+        assert result[-1].timestamp == beats[-1].timestamp
+
+    def test_section_boundary_swap_preserves_new_section_beat(self):
+        """When a new section's first beat conflicts with the previous section's
+        last cut, the new section's beat should replace it (swap), not be dropped."""
+        # Short section with low density — only 1 beat selected
+        beats = [
+            BeatInfo(timestamp=0.0, strength=0.8, is_downbeat=True),
+            BeatInfo(timestamp=1.0, strength=0.5, is_downbeat=False),
+            BeatInfo(timestamp=2.0, strength=0.8, is_downbeat=True),
+            # Second section starts here — first beat close to last cut of section 1
+            BeatInfo(timestamp=2.3, strength=0.8, is_downbeat=True),
+            BeatInfo(timestamp=3.0, strength=0.5, is_downbeat=False),
+            BeatInfo(timestamp=4.0, strength=0.5, is_downbeat=False),
+        ]
+        sections = [
+            MusicSection("intro", 0.0, 2.2, 0.8),
+            MusicSection("verse", 2.2, 5.0, 0.8),
+        ]
+        result = select_cut_points(beats, sections, 120.0, min_segment=0.5, max_segment=8.0)
+        timestamps = [b.timestamp for b in result]
+        # The new section's first beat at 2.3 should be present (swapped in)
+        assert 2.3 in timestamps

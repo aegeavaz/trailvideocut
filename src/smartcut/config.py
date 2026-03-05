@@ -23,14 +23,19 @@ class SmartCutConfig:
     scene_detect_threshold: float = 20.0
 
     # Audio analysis
+    beat_proximity_threshold: float = 0.10  # perceptual minimum gap between beats (seconds)
     beat_strength_threshold: float = 0.3
 
     # Segment selection
     transition_style: TransitionStyle = TransitionStyle.HARD_CUT
     crossfade_duration: float = 0.08
-    min_segment_duration: float = 0.25
+    min_segment_duration: float = 1.0
     max_segment_duration: float = 8.0
     include_timestamps: list[float] = field(default_factory=list)
+
+    # Quality-adaptive selection
+    quality_cv_threshold: float = 0.4
+    quality_max_reduction: float = 0.5
 
     # GPU acceleration
     use_gpu: bool = True

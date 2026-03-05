@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import cv2
 import numpy as np
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRemainingColumn
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn
 
 from smartcut.config import SmartCutConfig
 from smartcut.gpu import detect_gpu
@@ -84,10 +84,7 @@ class VideoAnalyzer:
     def _read_and_score(self) -> list[tuple[float, dict[str, float]]]:
         """Read sampled frames and score them.
 
-        Selects GPU or CPU path based on config and hardware detection:
-        - GPU path: accumulate all frames, batch-score edge/brightness/color on GPU,
-          run optical flow on CPU in parallel, merge results.
-        - CPU path (original): per-frame ThreadPoolExecutor scoring.
+        Selects GPU or CPU path based on config and hardware detection.
         """
         gpu_caps = detect_gpu()
         use_gpu = self.config.use_gpu and gpu_caps.cupy_available
@@ -183,7 +180,7 @@ class VideoAnalyzer:
             TextColumn("[progress.description]{task.description}"),
             BarColumn(),
             TextColumn("{task.percentage:>3.0f}%"),
-            TimeRemainingColumn(),
+            TimeElapsedColumn(),
         ) as progress:
             task = progress.add_task(
                 "Reading video frames (NVDEC GPU decode)",
@@ -234,7 +231,7 @@ class VideoAnalyzer:
             TextColumn("[progress.description]{task.description}"),
             BarColumn(),
             TextColumn("{task.percentage:>3.0f}%"),
-            TimeRemainingColumn(),
+            TimeElapsedColumn(),
         ) as progress:
             task = progress.add_task(
                 "Reading video frames (CPU decode)",
@@ -281,7 +278,7 @@ class VideoAnalyzer:
             TextColumn("[progress.description]{task.description}"),
             BarColumn(),
             TextColumn("{task.percentage:>3.0f}%"),
-            TimeRemainingColumn(),
+            TimeElapsedColumn(),
         ) as progress:
             score_task = progress.add_task(
                 "Scoring frames (GPU + CPU optical flow)",
@@ -341,7 +338,7 @@ class VideoAnalyzer:
             TextColumn("[progress.description]{task.description}"),
             BarColumn(),
             TextColumn("{task.percentage:>3.0f}%"),
-            TimeRemainingColumn(),
+            TimeElapsedColumn(),
         ) as progress:
             task = progress.add_task(
                 f"Analyzing video ({num_workers} scoring threads)",

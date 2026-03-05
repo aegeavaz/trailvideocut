@@ -20,6 +20,30 @@ class InterestScore:
             + self.brightness_change * 0.25
         )
 
+    def energy_weighted_composite(self, energy: float) -> float:
+        """Composite score with weights biased by audio energy.
+
+        High energy (>0.7): boosts optical_flow (action footage).
+        Low energy (<0.3): boosts edge_variance (scenic footage).
+        Mid energy: standard weights.
+        """
+        if energy > 0.7:
+            return (
+                self.optical_flow * 0.50
+                + self.color_change * 0.25
+                + self.edge_variance * 0.05
+                + self.brightness_change * 0.20
+            )
+        elif energy < 0.3:
+            return (
+                self.optical_flow * 0.15
+                + self.color_change * 0.20
+                + self.edge_variance * 0.40
+                + self.brightness_change * 0.25
+            )
+        else:
+            return self.composite
+
 
 @dataclass
 class VideoSegment:

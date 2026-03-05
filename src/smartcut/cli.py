@@ -39,10 +39,16 @@ def cut(
         0.08, "--crossfade", help="Crossfade duration in seconds"
     ),
     min_segment: float = typer.Option(
-        0.25, "--min-segment", help="Minimum segment duration in seconds"
+        1.0, "--min-segment", help="Minimum segment duration in seconds"
     ),
     max_segment: float = typer.Option(
         8.0, "--max-segment", help="Maximum segment duration in seconds"
+    ),
+    quality_cv: float = typer.Option(
+        0.4, "--quality-cv", help="Score CV threshold below which clip count is reduced"
+    ),
+    quality_reduction: float = typer.Option(
+        0.5, "--quality-reduction", help="Max fraction of intervals to remove when footage is uniform"
     ),
     output_fps: float = typer.Option(0, "--fps", help="Output video FPS (0 = match source video)"),
     preset: str = typer.Option(
@@ -68,6 +74,8 @@ def cut(
         crossfade_duration=crossfade_duration,
         min_segment_duration=min_segment,
         max_segment_duration=max_segment,
+        quality_cv_threshold=quality_cv,
+        quality_max_reduction=quality_reduction,
         output_fps=output_fps,
         output_preset=preset,
         output_threads=threads,
