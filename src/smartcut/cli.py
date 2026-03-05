@@ -24,7 +24,7 @@ def cut(
         Path("output.mp4"), "-o", "--output", help="Output video file path"
     ),
     transition: TransitionStyle = typer.Option(
-        TransitionStyle.HARD_CUT, "-t", "--transition", help="Transition style between cuts"
+        TransitionStyle.CROSSFADE, "-t", "--transition", help="Transition style between cuts"
     ),
     include: Optional[list[float]] = typer.Option(
         None, "-i", "--include", help="Must-include video timestamps in seconds (repeatable)"
@@ -36,7 +36,7 @@ def cut(
         0.5, "--segment-hop", help="Hop between overlapping analysis windows in seconds"
     ),
     crossfade_duration: float = typer.Option(
-        0.08, "--crossfade", help="Crossfade duration in seconds"
+        0.2, "--crossfade", help="Crossfade duration in seconds"
     ),
     min_segment: float = typer.Option(
         1.0, "--min-segment", help="Minimum segment duration in seconds"
@@ -52,7 +52,7 @@ def cut(
     ),
     output_fps: float = typer.Option(0, "--fps", help="Output video FPS (0 = match source video)"),
     preset: str = typer.Option(
-        "medium", "--preset", help="ffmpeg encoding preset (ultrafast..veryslow)"
+        "veryslow", "--preset", help="ffmpeg encoding preset (ultrafast..veryslow)"
     ),
     threads: int = typer.Option(
         0, "--threads", help="FFmpeg encoding threads (0 = auto-detect)"

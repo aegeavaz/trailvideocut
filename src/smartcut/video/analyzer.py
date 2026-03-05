@@ -3,7 +3,7 @@ import json
 import logging
 import os
 import subprocess
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import cv2
 import numpy as np
@@ -285,27 +285,39 @@ class VideoAnalyzer:
                 total=len(grays),
             )
 
+            n = len(grays)
+            gpu_weight = n // 2
+            flow_weight = n - gpu_weight
+
+            def gpu_progress(frames_done: int) -> None:
+                progress.advance(score_task, advance=frames_done * gpu_weight / n)
+
             with ThreadPoolExecutor(max_workers=num_workers + 1) as executor:
                 # Submit GPU batch scoring (runs on GPU, one thread is enough)
-                gpu_future = executor.submit(gpu_scorer.score_batch, grays, colors)
+                gpu_future = executor.submit(
+                    gpu_scorer.score_batch, grays, colors,
+                    progress_callback=gpu_progress,
+                )
 
                 # Submit CPU optical flow for each frame pair
                 flow_futures = {}
-                for i in range(1, len(grays)):
+                future_to_idx = {}
+                for i in range(1, n):
                     f = executor.submit(score_optical_flow, grays[i - 1], grays[i])
                     flow_futures[i] = f
+                    future_to_idx[f] = i
 
-                # Collect GPU results
-                gpu_results = gpu_future.result()
-                progress.update(score_task, completed=len(grays) // 2)
-
-                # Collect optical flow results
+                # Collect optical flow results as they complete
                 flow_scores = {0: 0.0}
-                for i, f in flow_futures.items():
+                for f in as_completed(future_to_idx):
+                    i = future_to_idx[f]
                     flow_scores[i] = f.result()
-                    progress.update(score_task, completed=len(grays) // 2 + i)
+                    progress.advance(score_task, advance=flow_weight / max(n - 1, 1))
 
-            progress.update(score_task, completed=len(grays))
+                # Collect GPU results (may already be done)
+                gpu_results = gpu_future.result()
+
+            progress.update(score_task, completed=n)
 
         # Merge GPU + CPU results
         frame_data: list[tuple[float, dict[str, float]]] = []

@@ -27,8 +27,8 @@ class SmartCutConfig:
     beat_strength_threshold: float = 0.3
 
     # Segment selection
-    transition_style: TransitionStyle = TransitionStyle.HARD_CUT
-    crossfade_duration: float = 0.08
+    transition_style: TransitionStyle = TransitionStyle.CROSSFADE
+    crossfade_duration: float = 0.2
     min_segment_duration: float = 1.0
     max_segment_duration: float = 8.0
     include_timestamps: list[float] = field(default_factory=list)
@@ -45,5 +45,5 @@ class SmartCutConfig:
     output_fps: float = 0
     output_codec: str = "libx264"
     output_audio_codec: str = "aac"
-    output_preset: str = "medium"
+    output_preset: str = "veryslow"
     output_threads: int = 0

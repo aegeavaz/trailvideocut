@@ -7,6 +7,7 @@ Optical flow remains on CPU (no CuPy equivalent for Farneback).
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 
 import numpy as np
 
@@ -40,6 +41,7 @@ class GPUFrameScorer:
         self,
         grays: list[np.ndarray],
         colors: list[np.ndarray],
+        progress_callback: Callable[[int], None] | None = None,
     ) -> list[dict[str, float]]:
         """Score all frames in batches, returning per-frame score dicts.
 
@@ -88,6 +90,9 @@ class GPUFrameScorer:
 
             # Free GPU memory between chunks
             cp.get_default_memory_pool().free_all_blocks()
+
+            if progress_callback is not None:
+                progress_callback(end - start)
 
         results: list[dict[str, float]] = []
         for i in range(n):

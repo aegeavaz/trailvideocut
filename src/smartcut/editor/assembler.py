@@ -1,7 +1,13 @@
+import json
 import os
+import re
+import shutil
+import subprocess
+import threading
 from fractions import Fraction
 
 from rich.console import Console
+from rich.progress import Progress, BarColumn, TimeRemainingColumn, TextColumn
 
 from moviepy import VideoFileClip, AudioFileClip, ImageClip, concatenate_videoclips
 from moviepy.video.fx.CrossFadeIn import CrossFadeIn
@@ -46,6 +52,403 @@ class VideoAssembler:
 
     def assemble(self, plan: CutPlan) -> None:
         """Execute the cut plan: extract subclips, concatenate, add audio, export."""
+        if (
+            plan.transition_style == TransitionStyle.CROSSFADE.value
+            and len(plan.decisions) > 1
+        ):
+            try:
+                self._assemble_ffmpeg_xfade(plan)
+                return
+            except Exception as e:
+                console.print(
+                    f"  [yellow]FFmpeg xfade failed ({e}), "
+                    f"falling back to MoviePy...[/yellow]"
+                )
+        else:
+            try:
+                self._assemble_ffmpeg_hardcut(plan)
+                return
+            except Exception as e:
+                console.print(
+                    f"  [yellow]FFmpeg hardcut failed ({e}), "
+                    f"falling back to MoviePy...[/yellow]"
+                )
+        self._assemble_moviepy(plan)
+
+    # ------------------------------------------------------------------
+    # FFmpeg native xfade path (fast)
+    # ------------------------------------------------------------------
+
+    def _probe_duration(self, filepath: str) -> float:
+        """Probe media file duration using ffprobe."""
+        ffprobe = shutil.which("ffprobe") or "ffprobe"
+        result = subprocess.run(
+            [
+                ffprobe, "-v", "quiet",
+                "-show_entries", "format=duration",
+                "-of", "json",
+                filepath,
+            ],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"ffprobe failed: {result.stderr}")
+        data = json.loads(result.stdout)
+        return float(data["format"]["duration"])
+
+    def _build_segments(self, plan: CutPlan, source_duration: float):
+        """Build list of (start, duration) for each segment."""
+        decisions = plan.decisions
+        xfade_dur = plan.crossfade_duration
+        n = len(decisions)
+        segments = []
+        for i, d in enumerate(decisions):
+            start = max(0.0, d.source_start)
+            end = min(source_duration, d.source_end)
+            is_last = i == n - 1
+            if not is_last:
+                end = min(source_duration, end + xfade_dur)
+            dur = end - start
+            if dur < 0.05:
+                continue
+            segments.append((start, dur))
+        return segments
+
+    def _build_filter_complex(
+        self, segments: list[tuple[float, float]],
+        audio_input_idx: int, audio_duration: float,
+    ) -> str:
+        xfade_dur = self.config.crossfade_duration
+        n = len(segments)
+        filters: list[str] = []
+
+        # Each segment is a separate input, so [0:v], [1:v], etc.
+        # Audio is input index `audio_input_idx`
+
+        # --- A) Chain xfade filters ---
+        if n == 1:
+            final_label = "0:v"
+            cumulative = segments[0][1]
+        else:
+            cumulative = segments[0][1]
+            prev_label = "0:v"
+            for i in range(1, n):
+                offset = cumulative - xfade_dur
+                if offset < 0:
+                    offset = 0.0
+                out_label = f"vx{i}" if i < n - 1 else "vout"
+                filters.append(
+                    f"[{prev_label}][{i}:v]xfade=transition=fade"
+                    f":duration={xfade_dur:.6f}:offset={offset:.6f}[{out_label}]"
+                )
+                prev_label = out_label
+                cumulative = offset + segments[i][1]
+            final_label = prev_label
+
+        # --- B) Freeze-frame padding if video < audio ---
+        video_total = cumulative
+        if video_total < audio_duration - 0.01:
+            deficit = audio_duration - video_total
+            filters.append(
+                f"[{final_label}]tpad=stop_mode=clone"
+                f":stop_duration={deficit:.6f}[vpadded]"
+            )
+            final_label = "vpadded"
+
+        # --- C) Trim to audio duration + video fade-out ---
+        fade_dur = min(2.0, audio_duration * 0.1)
+        fade_start = audio_duration - fade_dur
+        filters.append(
+            f"[{final_label}]trim=start=0:end={audio_duration:.6f},"
+            f"setpts=PTS-STARTPTS,"
+            f"fade=t=out:st={fade_start:.6f}:d={fade_dur:.6f}[vfinal]"
+        )
+
+        # --- D) Audio: trim + fade-out ---
+        filters.append(
+            f"[{audio_input_idx}:a]atrim=start=0:end={audio_duration:.6f},"
+            f"asetpts=PTS-STARTPTS,"
+            f"afade=t=out:st={fade_start:.6f}:d={fade_dur:.6f}[afinal]"
+        )
+
+        return ";".join(filters)
+
+    def _assemble_ffmpeg_xfade(self, plan: CutPlan) -> None:
+        """Assemble video using FFmpeg native xfade filter (fast path).
+
+        Uses per-segment input seeking (-ss/-t) instead of trim filters
+        to avoid decoding the entire source once per segment.
+        """
+        source_duration = self._probe_duration(str(self.config.video_path))
+        audio_duration = self._probe_duration(str(self.config.audio_path))
+
+        segments = self._build_segments(plan, source_duration)
+        if not segments:
+            raise RuntimeError("No valid segments for FFmpeg assembly")
+
+        audio_input_idx = len(segments)
+
+        filter_complex = self._build_filter_complex(
+            segments, audio_input_idx, audio_duration,
+        )
+
+        codec = get_encoder_codec(force_cpu=not self.config.use_gpu)
+        is_nvenc = codec == "h264_nvenc"
+
+        frac = Fraction(self.config.output_fps).limit_denominator(100000)
+        fps_str = f"{frac.numerator}/{frac.denominator}"
+
+        ffmpeg_bin = shutil.which("ffmpeg") or "ffmpeg"
+        cmd = [ffmpeg_bin, "-y"]
+
+        # Per-segment inputs with fast seeking
+        video_path = str(self.config.video_path)
+        for start, dur in segments:
+            cmd.extend(["-ss", f"{start:.6f}", "-t", f"{dur:.6f}", "-i", video_path])
+
+        # Audio input (last input)
+        cmd.extend(["-i", str(self.config.audio_path)])
+
+        # Filter complex
+        cmd.extend(["-filter_complex", filter_complex])
+
+        # Map outputs
+        cmd.extend(["-map", "[vfinal]", "-map", "[afinal]"])
+
+        # Video encoding
+        cmd.extend(["-c:v", codec, "-r", fps_str])
+
+        if is_nvenc:
+            nvenc_preset = _NVENC_PRESET_MAP.get(self.config.output_preset, "p5")
+            cmd.extend([
+                "-preset", nvenc_preset,
+                "-rc", "vbr", "-cq", "23",
+                "-pix_fmt", "yuv420p",
+            ])
+            console.print(
+                f"  Exporting to {self.config.output_path} "
+                f"(FFmpeg xfade + NVENC, preset {nvenc_preset})..."
+            )
+        else:
+            cmd.extend([
+                "-preset", self.config.output_preset,
+                "-pix_fmt", "yuv420p",
+            ])
+            console.print(
+                f"  Exporting to {self.config.output_path} "
+                f"(FFmpeg xfade + libx264)..."
+            )
+
+        # Audio encoding
+        cmd.extend(["-c:a", self.config.output_audio_codec])
+
+        # Threading
+        cmd.extend(["-threads", str(self._get_threads())])
+
+        # Output
+        cmd.append(str(self.config.output_path))
+
+        console.print(
+            f"  Running FFmpeg xfade assembly "
+            f"({len(segments)} segments)..."
+        )
+
+        # Add -progress pipe:1 for machine-readable progress on stdout
+        cmd.extend(["-progress", "pipe:1"])
+
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+
+        self._track_ffmpeg_progress(proc, audio_duration)
+
+    # ------------------------------------------------------------------
+    # FFmpeg native hard-cut path (fast)
+    # ------------------------------------------------------------------
+
+    def _build_segments_hardcut(self, plan: CutPlan, source_duration: float):
+        """Build list of (start, duration) for hard-cut segments (no xfade extension)."""
+        segments = []
+        for d in plan.decisions:
+            start = max(0.0, d.source_start)
+            end = min(source_duration, d.source_end)
+            dur = end - start
+            if dur < 0.05:
+                continue
+            segments.append((start, dur))
+        return segments
+
+    def _build_filter_complex_hardcut(
+        self, segments: list[tuple[float, float]],
+        audio_input_idx: int, audio_duration: float,
+    ) -> str:
+        n = len(segments)
+        filters: list[str] = []
+
+        # --- A) Concat all video segments ---
+        concat_inputs = "".join(f"[{i}:v]" for i in range(n))
+        filters.append(f"{concat_inputs}concat=n={n}:v=1:a=0[vconcat]")
+        final_label = "vconcat"
+
+        # --- B) Freeze-frame padding if video < audio ---
+        video_total = sum(dur for _, dur in segments)
+        if video_total < audio_duration - 0.01:
+            deficit = audio_duration - video_total
+            filters.append(
+                f"[{final_label}]tpad=stop_mode=clone"
+                f":stop_duration={deficit:.6f}[vpadded]"
+            )
+            final_label = "vpadded"
+
+        # --- C) Trim to audio duration + video fade-out ---
+        fade_dur = min(2.0, audio_duration * 0.1)
+        fade_start = audio_duration - fade_dur
+        filters.append(
+            f"[{final_label}]trim=start=0:end={audio_duration:.6f},"
+            f"setpts=PTS-STARTPTS,"
+            f"fade=t=out:st={fade_start:.6f}:d={fade_dur:.6f}[vfinal]"
+        )
+
+        # --- D) Audio: trim + fade-out ---
+        filters.append(
+            f"[{audio_input_idx}:a]atrim=start=0:end={audio_duration:.6f},"
+            f"asetpts=PTS-STARTPTS,"
+            f"afade=t=out:st={fade_start:.6f}:d={fade_dur:.6f}[afinal]"
+        )
+
+        return ";".join(filters)
+
+    def _assemble_ffmpeg_hardcut(self, plan: CutPlan) -> None:
+        """Assemble video using FFmpeg concat filter (hard-cut, no crossfade)."""
+        source_duration = self._probe_duration(str(self.config.video_path))
+        audio_duration = self._probe_duration(str(self.config.audio_path))
+
+        segments = self._build_segments_hardcut(plan, source_duration)
+        if not segments:
+            raise RuntimeError("No valid segments for FFmpeg assembly")
+
+        audio_input_idx = len(segments)
+
+        filter_complex = self._build_filter_complex_hardcut(
+            segments, audio_input_idx, audio_duration,
+        )
+
+        codec = get_encoder_codec(force_cpu=not self.config.use_gpu)
+        is_nvenc = codec == "h264_nvenc"
+
+        frac = Fraction(self.config.output_fps).limit_denominator(100000)
+        fps_str = f"{frac.numerator}/{frac.denominator}"
+
+        ffmpeg_bin = shutil.which("ffmpeg") or "ffmpeg"
+        cmd = [ffmpeg_bin, "-y"]
+
+        # Per-segment inputs with fast seeking
+        video_path = str(self.config.video_path)
+        for start, dur in segments:
+            cmd.extend(["-ss", f"{start:.6f}", "-t", f"{dur:.6f}", "-i", video_path])
+
+        # Audio input (last input)
+        cmd.extend(["-i", str(self.config.audio_path)])
+
+        # Filter complex
+        cmd.extend(["-filter_complex", filter_complex])
+
+        # Map outputs
+        cmd.extend(["-map", "[vfinal]", "-map", "[afinal]"])
+
+        # Video encoding
+        cmd.extend(["-c:v", codec, "-r", fps_str])
+
+        if is_nvenc:
+            nvenc_preset = _NVENC_PRESET_MAP.get(self.config.output_preset, "p5")
+            cmd.extend([
+                "-preset", nvenc_preset,
+                "-rc", "vbr", "-cq", "23",
+                "-pix_fmt", "yuv420p",
+            ])
+            console.print(
+                f"  Exporting to {self.config.output_path} "
+                f"(FFmpeg hardcut + NVENC, preset {nvenc_preset})..."
+            )
+        else:
+            cmd.extend([
+                "-preset", self.config.output_preset,
+                "-pix_fmt", "yuv420p",
+            ])
+            console.print(
+                f"  Exporting to {self.config.output_path} "
+                f"(FFmpeg hardcut + libx264)..."
+            )
+
+        # Audio encoding
+        cmd.extend(["-c:a", self.config.output_audio_codec])
+
+        # Threading
+        cmd.extend(["-threads", str(self._get_threads())])
+
+        # Output
+        cmd.append(str(self.config.output_path))
+
+        console.print(
+            f"  Running FFmpeg hardcut assembly "
+            f"({len(segments)} segments)..."
+        )
+
+        # Add -progress pipe:1 for machine-readable progress on stdout
+        cmd.extend(["-progress", "pipe:1"])
+
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+
+        self._track_ffmpeg_progress(proc, audio_duration)
+
+    def _track_ffmpeg_progress(self, proc: subprocess.Popen, total_duration: float) -> None:
+        """Parse FFmpeg -progress output and display a Rich progress bar."""
+        stderr_chunks: list[bytes] = []
+
+        def drain_stderr() -> None:
+            for chunk in proc.stderr:
+                stderr_chunks.append(chunk)
+
+        stderr_thread = threading.Thread(target=drain_stderr, daemon=True)
+        stderr_thread.start()
+
+        with Progress(
+            TextColumn("  [cyan]Encoding"),
+            BarColumn(),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            TimeRemainingColumn(),
+            console=console,
+        ) as progress:
+            task = progress.add_task("encoding", total=total_duration)
+            for raw_line in proc.stdout:
+                line = raw_line.decode(errors="replace").strip()
+                if line.startswith("out_time_us="):
+                    try:
+                        us = int(line.split("=", 1)[1])
+                        seconds = us / 1_000_000
+                        progress.update(task, completed=min(seconds, total_duration))
+                    except (ValueError, IndexError):
+                        pass
+                elif line == "progress=end":
+                    progress.update(task, completed=total_duration)
+
+        proc.wait()
+        stderr_thread.join(timeout=5)
+
+        if proc.returncode != 0:
+            err_text = b"".join(stderr_chunks).decode(errors="replace")
+            raise RuntimeError(
+                f"FFmpeg exit {proc.returncode}: {err_text[-500:] or 'no stderr'}"
+            )
+
+    # ------------------------------------------------------------------
+    # MoviePy path (fallback)
+    # ------------------------------------------------------------------
+
+    def _assemble_moviepy(self, plan: CutPlan) -> None:
+        """Assemble video using MoviePy (fallback for hard-cut or xfade failure)."""
         source_clip = VideoFileClip(str(self.config.video_path))
         audio_clip = AudioFileClip(str(self.config.audio_path))
 
