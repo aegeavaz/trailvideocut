@@ -3,7 +3,7 @@ from pathlib import Path
 import opentimelineio as otio
 from rich.console import Console
 
-from smartcut.config import SmartCutConfig
+from smartcut.config import SmartCutConfig, TransitionStyle
 from smartcut.editor.keyframes import probe_video_params
 from smartcut.editor.models import CutPlan
 
@@ -31,7 +31,10 @@ class DaVinciExporter:
         )
         timeline.to_json_file(str(otio_path))
         console.print(f"  OTIO: {otio_path}")
-        console.print(f"  {len(plan.decisions)} segments referenced from source video")
+        transition_info = ""
+        if plan.transition_style == TransitionStyle.CROSSFADE.value and len(plan.decisions) > 1:
+            transition_info = f" with {plan.crossfade_duration}s crossfades"
+        console.print(f"  {len(plan.decisions)} segments referenced from source video{transition_info}")
         return otio_path
 
 
@@ -110,9 +113,16 @@ def _generate_otio_timeline(
         ),
     )
 
-    # Video track — one clip per segment
+    # Video track — one clip per segment, with optional crossfade transitions
     # source_range start times must be offset by the embedded timecode
+    use_crossfade = (
+        plan.transition_style == TransitionStyle.CROSSFADE.value
+        and len(plan.decisions) > 1
+    )
+    half_xfade = plan.crossfade_duration / 2.0
+
     video_track = otio.schema.Track(name="Video", kind=otio.schema.TrackKind.Video)
+    clips = []
     for i, d in enumerate(plan.decisions, start=1):
         clip_start = tc_start + _seconds_to_rational_time(d.source_start, fps)
         clip = otio.schema.Clip(
@@ -123,7 +133,26 @@ def _generate_otio_timeline(
                 duration=_seconds_to_rational_time(d.source_end - d.source_start, fps),
             ),
         )
-        video_track.append(clip)
+        clips.append(clip)
+
+    if use_crossfade:
+        for i, clip in enumerate(clips):
+            video_track.append(clip)
+            if i < len(clips) - 1:
+                d_out = plan.decisions[i]
+                d_in = plan.decisions[i + 1]
+                out_handle = min(half_xfade, video_duration - d_out.source_end)
+                in_handle = min(half_xfade, d_in.source_start)
+                if out_handle > 0.01 and in_handle > 0.01:
+                    video_track.append(otio.schema.Transition(
+                        name=f"dissolve_{i+1:03d}",
+                        transition_type=otio.schema.Transition.Type.SMPTE_Dissolve,
+                        in_offset=_seconds_to_rational_time(in_handle, fps),
+                        out_offset=_seconds_to_rational_time(out_handle, fps),
+                    ))
+    else:
+        for clip in clips:
+            video_track.append(clip)
 
     # Audio track — single clip spanning full duration
     audio_track = otio.schema.Track(name="Audio", kind=otio.schema.TrackKind.Audio)
