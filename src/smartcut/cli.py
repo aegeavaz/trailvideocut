@@ -61,6 +61,9 @@ def cut(
     gpu_batch_size: int = typer.Option(
         64, "--gpu-batch-size", help="Frames per GPU batch for scoring"
     ),
+    davinci: bool = typer.Option(
+        False, "--davinci/--no-davinci", help="Export OTIO for DaVinci Resolve instead of rendering"
+    ),
 ):
     """Cut a motorcycle POV video to sync with a song's beats."""
     config = SmartCutConfig(
@@ -81,12 +84,16 @@ def cut(
         output_threads=threads,
         use_gpu=gpu,
         gpu_batch_size=gpu_batch_size,
+        davinci=davinci,
     )
 
     console.print("[bold]SmartCut[/] - Beat-synced video editor")
     console.print(f"  Video: {video}")
     console.print(f"  Audio: {audio}")
-    console.print(f"  Output: {output}")
+    if davinci:
+        console.print("  Mode: DaVinci OTIO export")
+    else:
+        console.print(f"  Output: {output}")
     if include:
         console.print(f"  Must-include: {include}")
 

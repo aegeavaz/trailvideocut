@@ -135,18 +135,29 @@ class SmartCutPipeline:
                 f"(dur: {duration:.1f}s, score: {d.interest_score:.3f})"
             )
 
-        # Phase 5: Assembly
-        console.print("\n[bold blue]Phase 5/5:[/] Assembling final video...")
-        assembler = VideoAssembler(self.config)
-        t0 = time.time()
-        assembler.assemble(cut_plan)
-        assembly_elapsed = time.time() - t0
-        console.print(f"\n[bold green]Done![/] Output saved to: {self.config.output_path}")
-        minutes, secs = divmod(assembly_elapsed, 60)
-        if minutes >= 1:
-            console.print(f"  Assembly time: {int(minutes)}m {secs:.1f}s")
+        # Phase 5: Assembly or clip export
+        if self.config.davinci:
+            from smartcut.editor.exporter import DaVinciExporter
+
+            console.print("\n[bold blue]Phase 5/5:[/] Exporting OTIO timeline...")
+            exporter = DaVinciExporter(self.config)
+            t0 = time.time()
+            otio_path = exporter.export(cut_plan)
+            export_elapsed = time.time() - t0
+            console.print(f"\n[bold green]Done![/] OTIO exported to: {otio_path}")
+            console.print(f"  Export time: {export_elapsed:.1f}s")
         else:
-            console.print(f"  Assembly time: {secs:.1f}s")
+            console.print("\n[bold blue]Phase 5/5:[/] Assembling final video...")
+            assembler = VideoAssembler(self.config)
+            t0 = time.time()
+            assembler.assemble(cut_plan)
+            assembly_elapsed = time.time() - t0
+            console.print(f"\n[bold green]Done![/] Output saved to: {self.config.output_path}")
+            minutes, secs = divmod(assembly_elapsed, 60)
+            if minutes >= 1:
+                console.print(f"  Assembly time: {int(minutes)}m {secs:.1f}s")
+            else:
+                console.print(f"  Assembly time: {secs:.1f}s")
 
     def _run_audio_analysis(self) -> AudioAnalysis:
         """Phase 1 + 1b: Analyze audio beats and musical structure."""

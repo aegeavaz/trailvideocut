@@ -41,6 +41,9 @@ class SmartCutConfig:
     use_gpu: bool = True
     gpu_batch_size: int = 64
 
+    # Export OTIO for DaVinci Resolve instead of rendering
+    davinci: bool = False
+
     # Output
     output_fps: float = 0
     output_codec: str = "libx264"
