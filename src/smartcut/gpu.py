@@ -18,13 +18,37 @@ class GPUCapabilities:
     cupy_available: bool = False
     nvenc_available: bool = False
     nvdec_available: bool = False
+    hwaccel_available: bool = False
+    hwaccels: tuple[str, ...] = ()
     gpu_name: str = ""
     gpu_memory_mb: int = 0
     system_ffmpeg: str = ""
 
     @property
     def any_gpu(self) -> bool:
-        return self.cupy_available or self.nvenc_available or self.nvdec_available
+        return self.cupy_available or self.nvenc_available or self.nvdec_available or self.hwaccel_available
+
+
+def _find_ffmpeg() -> str | None:
+    """Find an ffmpeg binary: system PATH first, then imageio-ffmpeg fallback.
+
+    The imageio-ffmpeg binary bundled with moviepy is a static build that
+    typically lacks hardware *encoders* (NVENC), but may still support
+    hardware *decoding* via platform APIs (D3D11VA, VideoToolbox, VAAPI)
+    through ``-hwaccel auto``.
+    """
+    path = shutil.which("ffmpeg")
+    if path:
+        return path
+    try:
+        import imageio_ffmpeg
+
+        path = imageio_ffmpeg.get_ffmpeg_exe()
+        if path:
+            return path
+    except Exception:
+        pass
+    return None
 
 
 def _check_ffmpeg_nvenc(ffmpeg_bin: str) -> bool:
@@ -55,14 +79,40 @@ def _check_ffmpeg_nvdec(ffmpeg_bin: str) -> bool:
         return False
 
 
+def _check_ffmpeg_hwaccels(ffmpeg_bin: str) -> tuple[str, ...]:
+    """Query ``ffmpeg -hwaccels`` and return available hardware acceleration methods.
+
+    Returns a tuple of method names (e.g. ``("cuda", "d3d11va", "dxva2")``).
+    """
+    try:
+        result = subprocess.run(
+            [ffmpeg_bin, "-hide_banner", "-hwaccels"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            return ()
+        # Output format: first line is "Hardware acceleration methods:", then one per line
+        lines = result.stdout.strip().splitlines()
+        methods: list[str] = []
+        for line in lines[1:]:  # skip header
+            method = line.strip()
+            if method:
+                methods.append(method)
+        return tuple(methods)
+    except (subprocess.TimeoutExpired, OSError):
+        return ()
+
+
 @functools.lru_cache(maxsize=1)
 def detect_gpu() -> GPUCapabilities:
-    """Detect GPU capabilities: CuPy for compute, NVENC for encoding.
+    """Detect GPU capabilities: CuPy for compute, HW accel for decoding/encoding.
 
-    NVENC detection checks the system ffmpeg (not moviepy's bundled one),
-    since the bundled imageio-ffmpeg binary typically lacks hardware encoders.
-    When NVENC is available, ``configure_moviepy_ffmpeg()`` should be called
-    to point moviepy at the system binary.
+    Checks the system ffmpeg first, falling back to the imageio-ffmpeg
+    bundled binary.  The bundled binary typically lacks hardware *encoders*
+    (NVENC) but may still support platform-native HW *decoding* via
+    ``-hwaccel auto`` (D3D11VA, VideoToolbox, VAAPI, etc.).
 
     Results are cached — safe to call multiple times.
     """
@@ -103,22 +153,27 @@ def detect_gpu() -> GPUCapabilities:
     except Exception:
         cupy_available = False
 
-    # 3. Check system ffmpeg for hardware codec support (NVENC/NVDEC).
-    #    moviepy bundles imageio-ffmpeg which is a static build without
-    #    hardware codecs, so we must check the system binary instead.
+    # 3. Check ffmpeg for hardware codec support (NVENC/NVDEC/hwaccels).
+    #    Prefer the system binary (which usually has full HW codec support),
+    #    but fall back to imageio-ffmpeg's bundled binary which may still
+    #    support platform-native HW decoding (D3D11VA, VideoToolbox, VAAPI).
     nvdec_available = False
-    ffmpeg_bin = shutil.which("ffmpeg")
+    hwaccels: tuple[str, ...] = ()
+    ffmpeg_bin = _find_ffmpeg()
     if ffmpeg_bin:
         system_ffmpeg = ffmpeg_bin
         if _check_ffmpeg_nvenc(ffmpeg_bin):
             nvenc_available = True
         if _check_ffmpeg_nvdec(ffmpeg_bin):
             nvdec_available = True
+        hwaccels = _check_ffmpeg_hwaccels(ffmpeg_bin)
 
     caps = GPUCapabilities(
         cupy_available=cupy_available,
         nvenc_available=nvenc_available,
         nvdec_available=nvdec_available,
+        hwaccel_available=len(hwaccels) > 0,
+        hwaccels=hwaccels,
         gpu_name=gpu_name,
         gpu_memory_mb=gpu_memory_mb,
         system_ffmpeg=system_ffmpeg,
@@ -126,7 +181,11 @@ def detect_gpu() -> GPUCapabilities:
 
     if caps.any_gpu:
         logger.info("GPU detected: %s (%d MB)", gpu_name, gpu_memory_mb)
-        logger.info("  CuPy: %s, NVENC: %s, NVDEC: %s", cupy_available, nvenc_available, nvdec_available)
+        logger.info(
+            "  CuPy: %s, NVENC: %s, NVDEC: %s, HW accels: %s",
+            cupy_available, nvenc_available, nvdec_available,
+            ", ".join(hwaccels) if hwaccels else "none",
+        )
     else:
         logger.info("No GPU acceleration available — using CPU")
 

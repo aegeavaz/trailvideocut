@@ -102,9 +102,10 @@ def cut(
         caps = detect_gpu()
         if caps.gpu_name:
             console.print(f"  GPU: {caps.gpu_name} ({caps.gpu_memory_mb} MB)")
+        hwdec_str = ", ".join(caps.hwaccels) if caps.hwaccels else "none"
         console.print(
             f"  CuPy: {'[green]yes[/]' if caps.cupy_available else '[yellow]no[/]'} | "
-            f"NVDEC: {'[green]yes[/]' if caps.nvdec_available else '[yellow]no[/]'} | "
+            f"HW decode: {'[green]' + hwdec_str + '[/]' if caps.hwaccel_available else '[yellow]none[/]'} | "
             f"NVENC: {'[green]yes[/]' if caps.nvenc_available else '[yellow]no[/]'}"
         )
         if not caps.any_gpu:

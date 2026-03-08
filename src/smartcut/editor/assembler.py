@@ -1,7 +1,6 @@
 import json
 import os
 import re
-import shutil
 import subprocess
 import threading
 from fractions import Fraction
@@ -16,7 +15,7 @@ from moviepy.audio.fx.AudioFadeOut import AudioFadeOut
 
 from smartcut.config import SmartCutConfig, TransitionStyle
 from smartcut.editor.models import CutPlan
-from smartcut.gpu import configure_moviepy_ffmpeg, get_encoder_codec, patch_nvenc_pixel_format
+from smartcut.gpu import _find_ffmpeg, configure_moviepy_ffmpeg, detect_gpu, get_encoder_codec, patch_nvenc_pixel_format
 
 console = Console()
 
@@ -80,21 +79,23 @@ class VideoAssembler:
     # ------------------------------------------------------------------
 
     def _probe_duration(self, filepath: str) -> float:
-        """Probe media file duration using ffprobe."""
-        ffprobe = shutil.which("ffprobe") or "ffprobe"
+        """Probe media file duration using ffmpeg (no ffprobe dependency).
+
+        Runs ``ffmpeg -i <file>`` which prints container metadata (including
+        Duration) to stderr and exits immediately with an error because no
+        output is specified.  This avoids requiring a separate ffprobe binary.
+        """
+        ffmpeg_bin = detect_gpu().system_ffmpeg or _find_ffmpeg() or "ffmpeg"
         result = subprocess.run(
-            [
-                ffprobe, "-v", "quiet",
-                "-show_entries", "format=duration",
-                "-of", "json",
-                filepath,
-            ],
+            [ffmpeg_bin, "-hide_banner", "-i", filepath],
             capture_output=True, text=True, timeout=10,
         )
-        if result.returncode != 0:
-            raise RuntimeError(f"ffprobe failed: {result.stderr}")
-        data = json.loads(result.stdout)
-        return float(data["format"]["duration"])
+        # ffmpeg prints "Duration: HH:MM:SS.ff" in stderr
+        match = re.search(r"Duration:\s*(\d+):(\d+):(\d+)\.(\d+)", result.stderr)
+        if match:
+            h, m, s, frac = match.groups()
+            return int(h) * 3600 + int(m) * 60 + int(s) + float(f"0.{frac}")
+        raise RuntimeError(f"Could not determine duration of {filepath}")
 
     def _build_segments(self, plan: CutPlan, source_duration: float):
         """Build list of (start, duration) for each segment."""
@@ -198,7 +199,7 @@ class VideoAssembler:
         frac = Fraction(self.config.output_fps).limit_denominator(100000)
         fps_str = f"{frac.numerator}/{frac.denominator}"
 
-        ffmpeg_bin = shutil.which("ffmpeg") or "ffmpeg"
+        ffmpeg_bin = detect_gpu().system_ffmpeg or _find_ffmpeg() or "ffmpeg"
         cmd = [ffmpeg_bin, "-y"]
 
         # Per-segment inputs with fast seeking
@@ -339,7 +340,7 @@ class VideoAssembler:
         frac = Fraction(self.config.output_fps).limit_denominator(100000)
         fps_str = f"{frac.numerator}/{frac.denominator}"
 
-        ffmpeg_bin = shutil.which("ffmpeg") or "ffmpeg"
+        ffmpeg_bin = detect_gpu().system_ffmpeg or _find_ffmpeg() or "ffmpeg"
         cmd = [ffmpeg_bin, "-y"]
 
         # Per-segment inputs with fast seeking

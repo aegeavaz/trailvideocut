@@ -35,7 +35,9 @@ class SmartCutPipeline:
                 mode_parts = []
                 if caps.cupy_available:
                     mode_parts.append("CuPy scoring")
-                if caps.nvdec_available:
+                if caps.hwaccel_available:
+                    mode_parts.append(f"HW decode ({', '.join(caps.hwaccels)})")
+                elif caps.nvdec_available:
                     mode_parts.append("NVDEC decoding")
                 if caps.nvenc_available:
                     mode_parts.append("NVENC encoding")

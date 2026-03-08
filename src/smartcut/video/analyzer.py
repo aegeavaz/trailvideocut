@@ -84,18 +84,51 @@ class VideoAnalyzer:
     def _read_and_score(self) -> list[tuple[float, dict[str, float]]]:
         """Read sampled frames and score them.
 
-        Selects GPU or CPU path based on config and hardware detection.
+        Three-tier path selection based on config and hardware detection:
+        1. Full GPU: CuPy scoring + hwaccel decode
+        2. Hybrid: hwaccel decode + CPU thread-pool scoring
+        3. Full CPU: cv2 decode + interleaved CPU scoring
         """
         gpu_caps = detect_gpu()
-        use_gpu = self.config.use_gpu and gpu_caps.cupy_available
 
-        if use_gpu:
+        if self.config.use_gpu and gpu_caps.cupy_available:
             return self._read_and_score_gpu()
+
+        if self.config.use_gpu and gpu_caps.hwaccel_available:
+            result = self._read_and_score_hybrid()
+            if result is not None:
+                return result
+
         return self._read_and_score_cpu()
+
+    def _get_video_info(self, ffmpeg_path: str) -> tuple[float, float] | None:
+        """Get (fps, duration) via ffprobe, falling back to cv2.
+
+        Tries ffprobe first (more accurate), then cv2 as fallback.
+        """
+        result = self._get_video_info_ffprobe(ffmpeg_path)
+        if result is not None:
+            return result
+        return self._get_video_info_cv2()
+
+    def _get_video_info_cv2(self) -> tuple[float, float] | None:
+        """Get (fps, duration) via cv2.VideoCapture fallback."""
+        cap = cv2.VideoCapture(str(self.config.video_path))
+        if not cap.isOpened():
+            return None
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        total_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+        cap.release()
+        if fps <= 0 or total_frames <= 0:
+            return None
+        return (fps, total_frames / fps)
 
     def _get_video_info_ffprobe(self, ffmpeg_path: str) -> tuple[float, float] | None:
         """Get (fps, duration) via ffprobe. Returns None on failure."""
-        ffprobe_path = ffmpeg_path.replace("ffmpeg", "ffprobe")
+        from pathlib import Path
+
+        p = Path(ffmpeg_path)
+        ffprobe_path = str(p.with_name(p.name.replace("ffmpeg", "ffprobe")))
         try:
             result = subprocess.run(
                 [
@@ -134,17 +167,21 @@ class VideoAnalyzer:
         except (subprocess.TimeoutExpired, OSError, ValueError, KeyError, json.JSONDecodeError):
             return None
 
-    def _read_frames_nvdec(self) -> tuple[list[float], list[np.ndarray], list[np.ndarray]] | None:
-        """Read frames using NVDEC hardware decoding via ffmpeg subprocess.
+    def _read_frames_hwaccel(self) -> tuple[list[float], list[np.ndarray], list[np.ndarray]] | None:
+        """Read frames using hardware-accelerated decoding via ffmpeg subprocess.
+
+        Uses ``-hwaccel auto`` so FFmpeg picks the best available method per
+        platform (NVDEC/CUDA, D3D11VA, DXVA2, VideoToolbox, VAAPI, etc.).
 
         Returns (times, grays, colors) or None on failure (triggering cv2 fallback).
         """
         gpu_caps = detect_gpu()
-        if not gpu_caps.nvdec_available or not gpu_caps.system_ffmpeg:
+        if not gpu_caps.hwaccel_available or not gpu_caps.system_ffmpeg:
             return None
 
-        info = self._get_video_info_ffprobe(gpu_caps.system_ffmpeg)
+        info = self._get_video_info(gpu_caps.system_ffmpeg)
         if info is None:
+            logger.warning("Could not get video info for HW accel decode")
             return None
         fps, duration = info
         self.source_fps = fps
@@ -156,7 +193,7 @@ class VideoAnalyzer:
 
         cmd = [
             gpu_caps.system_ffmpeg,
-            "-hwaccel", "cuda",
+            "-hwaccel", "auto",
             "-i", str(self.config.video_path),
             "-vf", f"fps={analysis_fps},scale={frame_w}:{frame_h}",
             "-f", "rawvideo",
@@ -183,7 +220,7 @@ class VideoAnalyzer:
             TimeElapsedColumn(),
         ) as progress:
             task = progress.add_task(
-                "Reading video frames (NVDEC GPU decode)",
+                "Reading video frames (HW accelerated decode)",
                 total=estimated_frames,
             )
             while True:
@@ -201,13 +238,16 @@ class VideoAnalyzer:
             progress.update(task, completed=max(estimated_frames, frame_count))
 
         proc.stdout.close()
+        stderr_out = proc.stderr.read() if proc.stderr else ""
         proc.wait()
 
         if not times:
-            logger.warning("NVDEC produced 0 frames, falling back to cv2")
+            logger.warning("HW accelerated decode produced 0 frames, falling back to cv2")
+            if stderr_out:
+                logger.warning("ffmpeg stderr: %s", stderr_out[:500])
             return None
 
-        logger.info("NVDEC decoded %d frames via hardware", len(times))
+        logger.info("HW accelerated decode: %d frames read", len(times))
         return (times, grays, colors)
 
     def _read_frames_cv2(self) -> tuple[list[float], list[np.ndarray], list[np.ndarray]]:
@@ -259,8 +299,8 @@ class VideoAnalyzer:
         """GPU scoring path: read all frames, then batch-score on GPU + CPU optical flow."""
         from smartcut.video.scorers_gpu import GPUFrameScorer
 
-        # Phase 1: Read frames — try NVDEC first, fall back to cv2
-        result = self._read_frames_nvdec()
+        # Phase 1: Read frames — try HW accel first, fall back to cv2
+        result = self._read_frames_hwaccel()
         if result is not None:
             times, grays, colors = result
         else:
@@ -327,6 +367,56 @@ class VideoAnalyzer:
             frame_data.append((times[i], scores))
 
         logger.info("GPU scoring complete: %d frames scored", len(frame_data))
+        return frame_data
+
+    def _read_and_score_hybrid(self) -> list[tuple[float, dict[str, float]]] | None:
+        """Hybrid path: HW-accelerated decode + CPU thread-pool scoring.
+
+        Returns None if HW decode fails, so the caller can fall through to
+        the full-CPU path.
+        """
+        # Phase 1: HW-accelerated frame reading
+        result = self._read_frames_hwaccel()
+        if result is None:
+            return None
+
+        times, grays, colors = result
+        if not times:
+            return []
+
+        # Phase 2: Score pre-read frames with ThreadPoolExecutor
+        num_workers = max(4, (os.cpu_count() or 4) - 2)
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("{task.percentage:>3.0f}%"),
+            TimeElapsedColumn(),
+        ) as progress:
+            score_task = progress.add_task(
+                f"Scoring frames (CPU, {num_workers} threads)",
+                total=len(grays),
+            )
+
+            pending: list[tuple[int, object]] = []
+            with ThreadPoolExecutor(max_workers=num_workers) as executor:
+                for i in range(len(grays)):
+                    prev_gray = grays[i - 1] if i > 0 else None
+                    prev_color = colors[i - 1] if i > 0 else None
+                    future = executor.submit(
+                        _score_single_frame, i, times[i],
+                        grays[i], colors[i], prev_gray, prev_color,
+                    )
+                    pending.append((i, future))
+
+                frame_data: list[tuple[float, dict[str, float]] | None] = [None] * len(grays)
+                for i, future in pending:
+                    index, current_time, scores = future.result()
+                    frame_data[index] = (current_time, scores)
+                    progress.advance(score_task)
+
+        logger.info("Hybrid scoring complete: %d frames scored", len(frame_data))
         return frame_data
 
     def _read_and_score_cpu(self) -> list[tuple[float, dict[str, float]]]:
