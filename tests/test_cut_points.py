@@ -1,7 +1,7 @@
 import pytest
 
-from smartcut.audio.models import BeatInfo, MusicSection
-from smartcut.editor.cut_points import (
+from trailvideocut.audio.models import BeatInfo, MusicSection
+from trailvideocut.editor.cut_points import (
     energy_to_density,
     select_cut_points,
     select_cut_points_for_section,

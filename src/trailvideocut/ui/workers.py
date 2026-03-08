@@ -2,16 +2,16 @@ from concurrent.futures import ThreadPoolExecutor
 
 from PySide6.QtCore import QThread, Signal
 
-from smartcut.audio.analyzer import AudioAnalyzer
-from smartcut.audio.models import AudioAnalysis
-from smartcut.audio.structure import MusicalStructureAnalyzer
-from smartcut.config import SmartCutConfig
-from smartcut.editor.assembler import VideoAssembler
-from smartcut.editor.cut_points import select_cut_points
-from smartcut.editor.models import CutPlan
-from smartcut.editor.selector import SegmentSelector
-from smartcut.video.analyzer import VideoAnalyzer
-from smartcut.video.models import VideoSegment
+from trailvideocut.audio.analyzer import AudioAnalyzer
+from trailvideocut.audio.models import AudioAnalysis
+from trailvideocut.audio.structure import MusicalStructureAnalyzer
+from trailvideocut.config import TrailVideoCutConfig
+from trailvideocut.editor.assembler import VideoAssembler
+from trailvideocut.editor.cut_points import select_cut_points
+from trailvideocut.editor.models import CutPlan
+from trailvideocut.editor.selector import SegmentSelector
+from trailvideocut.video.analyzer import VideoAnalyzer
+from trailvideocut.video.models import VideoSegment
 
 
 class AnalysisWorker(QThread):
@@ -24,16 +24,16 @@ class AnalysisWorker(QThread):
     finished = Signal(object, object, object, float)  # AudioAnalysis, segments, CutPlan, fps
     error = Signal(str)
 
-    def __init__(self, config: SmartCutConfig, parent=None):
+    def __init__(self, config: TrailVideoCutConfig, parent=None):
         super().__init__(parent)
         self._config = config
 
     def run(self):
         try:
             # Validate
-            from smartcut.pipeline import SmartCutPipeline
+            from trailvideocut.pipeline import TrailVideoCutPipeline
 
-            pipeline = SmartCutPipeline(self._config)
+            pipeline = TrailVideoCutPipeline(self._config)
             pipeline._validate_inputs()
 
             # Phase 1+2: concurrent audio + video analysis
@@ -109,7 +109,7 @@ class RenderWorker(QThread):
     finished = Signal(str)  # output path
     error = Signal(str)
 
-    def __init__(self, config: SmartCutConfig, cut_plan: CutPlan, parent=None):
+    def __init__(self, config: TrailVideoCutConfig, cut_plan: CutPlan, parent=None):
         super().__init__(parent)
         self._config = config
         self._cut_plan = cut_plan
@@ -117,7 +117,7 @@ class RenderWorker(QThread):
     def run(self):
         try:
             if self._config.davinci:
-                from smartcut.editor.exporter import DaVinciExporter
+                from trailvideocut.editor.exporter import DaVinciExporter
 
                 self.status.emit("Exporting OTIO timeline...")
                 exporter = DaVinciExporter(self._config)

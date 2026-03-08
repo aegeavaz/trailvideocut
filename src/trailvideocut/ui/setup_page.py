@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from smartcut.ui.video_player import VideoPlayer
+from trailvideocut.ui.video_player import VideoPlayer
 
 _VIDEO_FILTER = "Video Files (*.mp4 *.avi *.mkv *.mov *.webm);;All Files (*)"
 _AUDIO_FILTER = "Audio Files (*.wav *.mp3 *.flac *.ogg *.m4a);;All Files (*)"

@@ -10,14 +10,14 @@ os.environ.setdefault(
 
 from PySide6.QtWidgets import QApplication
 
-from smartcut.ui.main_window import MainWindow
+from trailvideocut.ui.main_window import MainWindow
 
 
 def launch():
-    """Launch the SmartCut graphical interface."""
+    """Launch the TrailVideoCut graphical interface."""
     app = QApplication(sys.argv)
-    app.setApplicationName("SmartCut")
-    app.setOrganizationName("SmartCut")
+    app.setApplicationName("TrailVideoCut")
+    app.setOrganizationName("TrailVideoCut")
 
     window = MainWindow()
     window.show()

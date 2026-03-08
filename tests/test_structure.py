@@ -1,8 +1,8 @@
 import numpy as np
 import pytest
 
-from smartcut.audio.models import MusicSection
-from smartcut.audio.structure import MusicalStructureAnalyzer
+from trailvideocut.audio.models import MusicSection
+from trailvideocut.audio.structure import MusicalStructureAnalyzer
 
 
 class TestBoundaryDeduplication:

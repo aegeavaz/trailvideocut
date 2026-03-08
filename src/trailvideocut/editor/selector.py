@@ -1,10 +1,10 @@
 import bisect
 import statistics
 
-from smartcut.audio.models import AudioAnalysis, BeatInfo, MusicSection
-from smartcut.config import SmartCutConfig
-from smartcut.editor.models import CutPlan, EditDecision
-from smartcut.video.models import VideoSegment
+from trailvideocut.audio.models import AudioAnalysis, BeatInfo, MusicSection
+from trailvideocut.config import TrailVideoCutConfig
+from trailvideocut.editor.models import CutPlan, EditDecision
+from trailvideocut.video.models import VideoSegment
 
 
 class SegmentSelector:
@@ -15,7 +15,7 @@ class SegmentSelector:
     Quality-adaptive cut count reduces clips when footage is uniform.
     """
 
-    def __init__(self, config: SmartCutConfig):
+    def __init__(self, config: TrailVideoCutConfig):
         self.config = config
 
     def select(

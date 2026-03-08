@@ -117,7 +117,7 @@ class ExportPage(QWidget):
             return
         is_davinci = self._radio_davinci.isChecked()
         if not is_davinci:
-            from smartcut.gpu import _find_ffmpeg
+            from trailvideocut.gpu import _find_ffmpeg
             if _find_ffmpeg() is None:
                 self.set_error(
                     "FFmpeg not found. Install FFmpeg and add it to your system PATH.\n"

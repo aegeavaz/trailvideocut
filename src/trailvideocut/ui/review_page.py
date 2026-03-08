@@ -19,10 +19,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from smartcut.audio.models import AudioAnalysis, MusicSection
-from smartcut.editor.models import CutPlan, EditDecision
-from smartcut.ui.timeline import TimelineWidget
-from smartcut.ui.video_player import VideoPlayer
+from trailvideocut.audio.models import AudioAnalysis, MusicSection
+from trailvideocut.editor.models import CutPlan, EditDecision
+from trailvideocut.ui.timeline import TimelineWidget
+from trailvideocut.ui.video_player import VideoPlayer
 
 
 class ReviewPage(QWidget):

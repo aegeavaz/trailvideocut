@@ -5,7 +5,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from smartcut.gpu import _find_ffmpeg
+from trailvideocut.gpu import _find_ffmpeg
 
 logger = logging.getLogger(__name__)
 

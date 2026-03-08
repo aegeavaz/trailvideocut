@@ -9,15 +9,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from smartcut.audio.models import AudioAnalysis
-from smartcut.config import SmartCutConfig, TransitionStyle
-from smartcut.editor.models import CutPlan, EditDecision
-from smartcut.ui.export_page import ExportPage
-from smartcut.ui.review_page import ReviewPage
-from smartcut.ui.setup_page import SetupPage
-from smartcut.ui.style import DARK_STYLESHEET
-from smartcut.ui.workers import AnalysisWorker, RenderWorker
-from smartcut.video.models import VideoSegment
+from trailvideocut.audio.models import AudioAnalysis
+from trailvideocut.config import TrailVideoCutConfig, TransitionStyle
+from trailvideocut.editor.models import CutPlan, EditDecision
+from trailvideocut.ui.export_page import ExportPage
+from trailvideocut.ui.review_page import ReviewPage
+from trailvideocut.ui.setup_page import SetupPage
+from trailvideocut.ui.style import DARK_STYLESHEET
+from trailvideocut.ui.workers import AnalysisWorker, RenderWorker
+from trailvideocut.video.models import VideoSegment
 
 
 class MainWindow(QMainWindow):
@@ -25,12 +25,12 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("SmartCut")
+        self.setWindowTitle("TrailVideoCut")
         self.setMinimumSize(900, 600)
         self.setStyleSheet(DARK_STYLESHEET)
 
         # State
-        self._config: SmartCutConfig | None = None
+        self._config: TrailVideoCutConfig | None = None
         self._audio: AudioAnalysis | None = None
         self._segments: list[VideoSegment] = []
         self._cut_plan: CutPlan | None = None
@@ -103,7 +103,7 @@ class MainWindow(QMainWindow):
     # --- Analysis ---
 
     def _start_analysis(self, settings: dict):
-        self._config = SmartCutConfig(**settings)
+        self._config = TrailVideoCutConfig(**settings)
         self._video_duration = self._setup_page.video_duration
         self._setup_page.show_go_to_review(False)
 

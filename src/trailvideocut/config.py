@@ -9,8 +9,8 @@ class TransitionStyle(str, Enum):
 
 
 @dataclass
-class SmartCutConfig:
-    """Global configuration for a SmartCut run."""
+class TrailVideoCutConfig:
+    """Global configuration for a TrailVideoCut run."""
 
     video_path: Path
     audio_path: Path

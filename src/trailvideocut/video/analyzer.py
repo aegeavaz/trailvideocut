@@ -9,12 +9,12 @@ import cv2
 import numpy as np
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn
 
-from smartcut.config import SmartCutConfig
-from smartcut.gpu import detect_gpu
+from trailvideocut.config import TrailVideoCutConfig
+from trailvideocut.gpu import detect_gpu
 from collections.abc import Callable
 
-from smartcut.video.models import InterestScore, VideoSegment
-from smartcut.video.scorers import (
+from trailvideocut.video.models import InterestScore, VideoSegment
+from trailvideocut.video.scorers import (
     score_brightness_change,
     score_color_histogram_change,
     score_edge_variance,
@@ -50,7 +50,7 @@ class VideoAnalyzer:
 
     def __init__(
         self,
-        config: SmartCutConfig,
+        config: TrailVideoCutConfig,
         progress_callback: "Callable[[int, int], None] | None" = None,
         status_callback: "Callable[[str], None] | None" = None,
     ):
@@ -314,7 +314,7 @@ class VideoAnalyzer:
 
     def _read_and_score_gpu(self) -> list[tuple[float, dict[str, float]]]:
         """GPU scoring path: read all frames, then batch-score on GPU + CPU optical flow."""
-        from smartcut.video.scorers_gpu import GPUFrameScorer
+        from trailvideocut.video.scorers_gpu import GPUFrameScorer
 
         # Phase 1: Read frames — try HW accel first, fall back to cv2
         result = self._read_frames_hwaccel()

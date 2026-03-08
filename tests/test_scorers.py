@@ -1,6 +1,6 @@
 import numpy as np
 
-from smartcut.video.scorers import (
+from trailvideocut.video.scorers import (
     score_brightness_change,
     score_color_histogram_change,
     score_edge_variance,

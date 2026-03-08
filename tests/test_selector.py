@@ -3,20 +3,20 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from smartcut.audio.models import AudioAnalysis, BeatInfo, MusicSection
-from smartcut.config import SmartCutConfig, TransitionStyle
-from smartcut.editor.models import EditDecision
-from smartcut.editor.selector import SegmentSelector
-from smartcut.video.models import InterestScore, VideoSegment
+from trailvideocut.audio.models import AudioAnalysis, BeatInfo, MusicSection
+from trailvideocut.config import TrailVideoCutConfig, TransitionStyle
+from trailvideocut.editor.models import EditDecision
+from trailvideocut.editor.selector import SegmentSelector
+from trailvideocut.video.models import InterestScore, VideoSegment
 
 
-def _make_config(**overrides) -> SmartCutConfig:
+def _make_config(**overrides) -> TrailVideoCutConfig:
     defaults = dict(
         video_path=Path("test.mp4"),
         audio_path=Path("test.wav"),
     )
     defaults.update(overrides)
-    return SmartCutConfig(**defaults)
+    return TrailVideoCutConfig(**defaults)
 
 
 def _make_segments(n: int = 40, hop: float = 0.5, window: float = 2.0) -> list[VideoSegment]:

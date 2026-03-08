@@ -2,7 +2,7 @@ from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
-from smartcut.editor.models import EditDecision
+from trailvideocut.editor.models import EditDecision
 
 _MARGIN_LEFT = 50
 _MARGIN_RIGHT = 10

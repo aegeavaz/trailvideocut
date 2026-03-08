@@ -1,14 +1,14 @@
 import numpy as np
 import librosa
 
-from smartcut.audio.models import AudioAnalysis, BeatInfo
-from smartcut.config import SmartCutConfig
+from trailvideocut.audio.models import AudioAnalysis, BeatInfo
+from trailvideocut.config import TrailVideoCutConfig
 
 
 class AudioAnalyzer:
     """Analyze audio for beats, tempo, and onset strength."""
 
-    def __init__(self, config: SmartCutConfig):
+    def __init__(self, config: TrailVideoCutConfig):
         self.config = config
 
     def analyze(self) -> AudioAnalysis:

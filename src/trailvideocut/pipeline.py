@@ -4,24 +4,24 @@ from fractions import Fraction
 
 from rich.console import Console
 
-from smartcut.audio.analyzer import AudioAnalyzer
-from smartcut.audio.models import AudioAnalysis
-from smartcut.audio.structure import MusicalStructureAnalyzer
-from smartcut.config import SmartCutConfig
-from smartcut.editor.assembler import VideoAssembler
-from smartcut.editor.cut_points import energy_to_density, select_cut_points
-from smartcut.editor.selector import SegmentSelector
-from smartcut.gpu import detect_gpu
-from smartcut.video.analyzer import VideoAnalyzer
-from smartcut.video.models import VideoSegment
+from trailvideocut.audio.analyzer import AudioAnalyzer
+from trailvideocut.audio.models import AudioAnalysis
+from trailvideocut.audio.structure import MusicalStructureAnalyzer
+from trailvideocut.config import TrailVideoCutConfig
+from trailvideocut.editor.assembler import VideoAssembler
+from trailvideocut.editor.cut_points import energy_to_density, select_cut_points
+from trailvideocut.editor.selector import SegmentSelector
+from trailvideocut.gpu import detect_gpu
+from trailvideocut.video.analyzer import VideoAnalyzer
+from trailvideocut.video.models import VideoSegment
 
 console = Console()
 
 
-class SmartCutPipeline:
+class TrailVideoCutPipeline:
     """Orchestrator: analyze audio/video, select segments, assemble output."""
 
-    def __init__(self, config: SmartCutConfig):
+    def __init__(self, config: TrailVideoCutConfig):
         self.config = config
 
     def run(self) -> None:
@@ -139,7 +139,7 @@ class SmartCutPipeline:
 
         # Phase 5: Assembly or clip export
         if self.config.davinci:
-            from smartcut.editor.exporter import DaVinciExporter
+            from trailvideocut.editor.exporter import DaVinciExporter
 
             # Auto-resolve output path for CLI: .mp4 default → .otio
             if self.config.output_path.suffix.lower() == ".mp4":

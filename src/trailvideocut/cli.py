@@ -4,12 +4,12 @@ from typing import Optional
 import typer
 from rich.console import Console
 
-from smartcut.config import SmartCutConfig, TransitionStyle
-from smartcut.gpu import detect_gpu
-from smartcut.pipeline import SmartCutPipeline
+from trailvideocut.config import TrailVideoCutConfig, TransitionStyle
+from trailvideocut.gpu import detect_gpu
+from trailvideocut.pipeline import TrailVideoCutPipeline
 
 app = typer.Typer(
-    name="smartcut",
+    name="trailvideocut",
     help="Automatically cut motorcycle POV videos to sync with music beats.",
     no_args_is_help=True,
 )
@@ -66,7 +66,7 @@ def cut(
     ),
 ):
     """Cut a motorcycle POV video to sync with a song's beats."""
-    config = SmartCutConfig(
+    config = TrailVideoCutConfig(
         video_path=video,
         audio_path=audio,
         output_path=output,
@@ -87,7 +87,7 @@ def cut(
         davinci=davinci,
     )
 
-    console.print("[bold]SmartCut[/] - Beat-synced video editor")
+    console.print("[bold]TrailVideoCut[/] - Beat-synced video editor")
     console.print(f"  Video: {video}")
     console.print(f"  Audio: {audio}")
     if davinci:
@@ -116,7 +116,7 @@ def cut(
     console.print()
 
     try:
-        pipeline = SmartCutPipeline(config)
+        pipeline = TrailVideoCutPipeline(config)
         pipeline.run()
     except Exception as e:
         console.print(f"\n[bold red]Error:[/] {e}")
@@ -134,11 +134,11 @@ def analyze(
         raise typer.Exit(code=1)
 
     if audio:
-        from smartcut.audio.analyzer import AudioAnalyzer
-        from smartcut.audio.structure import MusicalStructureAnalyzer
+        from trailvideocut.audio.analyzer import AudioAnalyzer
+        from trailvideocut.audio.structure import MusicalStructureAnalyzer
 
         console.print(f"[bold]Analyzing audio:[/] {audio}")
-        config = SmartCutConfig(video_path=Path("dummy.mp4"), audio_path=audio)
+        config = TrailVideoCutConfig(video_path=Path("dummy.mp4"), audio_path=audio)
         analyzer = AudioAnalyzer(config)
         result = analyzer.analyze()
         console.print(
@@ -161,10 +161,10 @@ def analyze(
             )
 
     if video:
-        from smartcut.video.analyzer import VideoAnalyzer
+        from trailvideocut.video.analyzer import VideoAnalyzer
 
         console.print(f"\n[bold]Analyzing video:[/] {video}")
-        config = SmartCutConfig(video_path=video, audio_path=Path("dummy.wav"))
+        config = TrailVideoCutConfig(video_path=video, audio_path=Path("dummy.wav"))
         analyzer = VideoAnalyzer(config)
         segments = analyzer.analyze()
         console.print(f"  {len(segments)} segments analyzed\n")
@@ -183,13 +183,13 @@ def analyze(
 
 @app.command(name="ui")
 def launch_ui():
-    """Launch the SmartCut graphical interface."""
+    """Launch the TrailVideoCut graphical interface."""
     try:
-        from smartcut.ui.app import launch
+        from trailvideocut.ui.app import launch
     except ImportError:
         console.print(
             "[bold red]Error:[/] PySide6 is required for the UI.\n"
-            "Install it with: pip install 'smartcut[ui]'"
+            "Install it with: pip install 'trailvideocut[ui]'"
         )
         raise typer.Exit(code=1)
     launch()

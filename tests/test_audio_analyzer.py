@@ -3,9 +3,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from smartcut.audio.models import BeatInfo
-from smartcut.audio.analyzer import AudioAnalyzer
-from smartcut.config import SmartCutConfig
+from trailvideocut.audio.models import BeatInfo
+from trailvideocut.audio.analyzer import AudioAnalyzer
+from trailvideocut.config import TrailVideoCutConfig
 
 
 class TestBeatFiltering:
@@ -14,7 +14,7 @@ class TestBeatFiltering:
     def _make_analyzer(self, **overrides) -> AudioAnalyzer:
         defaults = dict(video_path=Path("test.mp4"), audio_path=Path("test.wav"))
         defaults.update(overrides)
-        config = SmartCutConfig(**defaults)
+        config = TrailVideoCutConfig(**defaults)
         return AudioAnalyzer(config)
 
     def test_filters_beats_too_close(self):

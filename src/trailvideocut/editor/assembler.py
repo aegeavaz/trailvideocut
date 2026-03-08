@@ -13,9 +13,9 @@ from moviepy.video.fx.CrossFadeIn import CrossFadeIn
 from moviepy.video.fx.FadeOut import FadeOut
 from moviepy.audio.fx.AudioFadeOut import AudioFadeOut
 
-from smartcut.config import SmartCutConfig, TransitionStyle
-from smartcut.editor.models import CutPlan
-from smartcut.gpu import _find_ffmpeg, configure_moviepy_ffmpeg, detect_gpu, get_encoder_codec, patch_nvenc_pixel_format
+from trailvideocut.config import TrailVideoCutConfig, TransitionStyle
+from trailvideocut.editor.models import CutPlan
+from trailvideocut.gpu import _find_ffmpeg, configure_moviepy_ffmpeg, detect_gpu, get_encoder_codec, patch_nvenc_pixel_format
 
 console = Console()
 
@@ -49,7 +49,7 @@ class VideoAssembler:
 
     def __init__(
         self,
-        config: SmartCutConfig,
+        config: TrailVideoCutConfig,
         progress_callback: "Callable[[int, int], None] | None" = None,
     ):
         self.config = config

@@ -1,12 +1,12 @@
 from scenedetect import open_video, SceneManager, ContentDetector
 
-from smartcut.config import SmartCutConfig
+from trailvideocut.config import TrailVideoCutConfig
 
 
 class SceneBoundaryDetector:
     """Detect gradual scene transitions using PySceneDetect."""
 
-    def __init__(self, config: SmartCutConfig):
+    def __init__(self, config: TrailVideoCutConfig):
         self.config = config
 
     def detect_boundaries(self) -> list[float]:

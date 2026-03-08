@@ -4,7 +4,7 @@ Selects which beats become cut points based on musical energy sections.
 High-energy sections produce more cuts; low-energy sections produce fewer.
 """
 
-from smartcut.audio.models import BeatInfo, MusicSection
+from trailvideocut.audio.models import BeatInfo, MusicSection
 
 
 def energy_to_density(

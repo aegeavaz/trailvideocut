@@ -3,9 +3,9 @@ from pathlib import Path
 import opentimelineio as otio
 from rich.console import Console
 
-from smartcut.config import SmartCutConfig, TransitionStyle
-from smartcut.editor.keyframes import probe_video_params
-from smartcut.editor.models import CutPlan
+from trailvideocut.config import TrailVideoCutConfig, TransitionStyle
+from trailvideocut.editor.keyframes import probe_video_params
+from trailvideocut.editor.models import CutPlan
 
 console = Console()
 
@@ -13,7 +13,7 @@ console = Console()
 class DaVinciExporter:
     """Export an OTIO timeline referencing source video and audio directly."""
 
-    def __init__(self, config: SmartCutConfig):
+    def __init__(self, config: TrailVideoCutConfig):
         self.config = config
 
     def export(self, plan: CutPlan) -> Path:
@@ -165,7 +165,7 @@ def _generate_otio_timeline(
         ),
     ))
 
-    timeline = otio.schema.Timeline(name="SmartCut Export")
+    timeline = otio.schema.Timeline(name="TrailVideoCut Export")
     timeline.tracks.append(video_track)
     timeline.tracks.append(audio_track)
     return timeline

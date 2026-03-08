@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from smartcut.video.scorers import (
+from trailvideocut.video.scorers import (
     score_brightness_change,
     score_color_histogram_change,
     score_edge_variance,
@@ -21,7 +21,7 @@ pytestmark = pytest.mark.skipif(not CUPY_AVAILABLE, reason="CuPy not installed")
 
 @pytest.fixture
 def gpu_scorer():
-    from smartcut.video.scorers_gpu import GPUFrameScorer
+    from trailvideocut.video.scorers_gpu import GPUFrameScorer
 
     return GPUFrameScorer(batch_size=32)
 
@@ -153,7 +153,7 @@ class TestBatchChunking:
     """Verify chunking produces consistent results."""
 
     def test_small_vs_large_batch(self):
-        from smartcut.video.scorers_gpu import GPUFrameScorer
+        from trailvideocut.video.scorers_gpu import GPUFrameScorer
 
         grays = [_random_gray(seed=i) for i in range(20)]
         colors = [_random_color(seed=i) for i in range(20)]

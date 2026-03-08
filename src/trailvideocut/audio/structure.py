@@ -1,7 +1,7 @@
 import numpy as np
 import librosa
 
-from smartcut.audio.models import MusicSection
+from trailvideocut.audio.models import MusicSection
 
 
 class MusicalStructureAnalyzer:

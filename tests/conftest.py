@@ -1,8 +1,8 @@
 import numpy as np
 import pytest
 
-from smartcut.audio.models import AudioAnalysis, BeatInfo, MusicSection
-from smartcut.video.models import InterestScore, VideoSegment
+from trailvideocut.audio.models import AudioAnalysis, BeatInfo, MusicSection
+from trailvideocut.video.models import InterestScore, VideoSegment
 
 
 @pytest.fixture

@@ -1,4 +1,4 @@
-"""GPU detection and capability reporting for SmartCut."""
+"""GPU detection and capability reporting for TrailVideoCut."""
 
 from __future__ import annotations
 
