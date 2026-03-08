@@ -1,0 +1,184 @@
+from pathlib import Path
+
+from PySide6.QtWidgets import (
+    QLabel,
+    QMainWindow,
+    QStackedWidget,
+    QStatusBar,
+    QVBoxLayout,
+    QWidget,
+)
+
+from smartcut.audio.models import AudioAnalysis
+from smartcut.config import SmartCutConfig, TransitionStyle
+from smartcut.editor.models import CutPlan, EditDecision
+from smartcut.ui.export_page import ExportPage
+from smartcut.ui.review_page import ReviewPage
+from smartcut.ui.setup_page import SetupPage
+from smartcut.ui.style import DARK_STYLESHEET
+from smartcut.ui.workers import AnalysisWorker, RenderWorker
+from smartcut.video.models import VideoSegment
+
+
+class MainWindow(QMainWindow):
+    """Main application window with wizard-style page navigation."""
+
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("SmartCut")
+        self.setMinimumSize(900, 600)
+        self.setStyleSheet(DARK_STYLESHEET)
+
+        # State
+        self._config: SmartCutConfig | None = None
+        self._audio: AudioAnalysis | None = None
+        self._segments: list[VideoSegment] = []
+        self._cut_plan: CutPlan | None = None
+        self._source_fps = 30.0
+        self._video_duration = 0.0
+
+        # Workers
+        self._analysis_worker: AnalysisWorker | None = None
+        self._render_worker: RenderWorker | None = None
+
+        self._build_ui()
+        self._connect_signals()
+
+        # Start maximized
+        self.showMaximized()
+
+    def _build_ui(self):
+        central = QWidget()
+        self.setCentralWidget(central)
+        layout = QVBoxLayout(central)
+        layout.setContentsMargins(6, 4, 6, 0)
+        layout.setSpacing(0)
+
+        # Stacked pages
+        self._pages = QStackedWidget()
+        self._setup_page = SetupPage()
+        self._review_page = ReviewPage()
+        self._export_page = ExportPage()
+
+        self._pages.addWidget(self._setup_page)   # 0
+        self._pages.addWidget(self._review_page)   # 1
+        self._pages.addWidget(self._export_page)   # 2
+
+        layout.addWidget(self._pages, stretch=1)
+
+        # Status bar
+        self._statusbar = QStatusBar()
+        self.setStatusBar(self._statusbar)
+        self._statusbar.showMessage("Ready")
+
+    def _connect_signals(self):
+        self._setup_page.analyze_requested.connect(self._start_analysis)
+        self._review_page.back_requested.connect(lambda: self._go_page(0))
+        self._review_page.export_requested.connect(self._go_to_export)
+        self._export_page.back_requested.connect(lambda: self._go_page(1))
+        self._export_page.start_export.connect(self._start_export)
+
+    def _go_page(self, index: int):
+        self._pages.setCurrentIndex(index)
+
+    # --- Analysis ---
+
+    def _start_analysis(self, settings: dict):
+        self._config = SmartCutConfig(**settings)
+        self._video_duration = self._setup_page.video_duration
+
+        self._statusbar.showMessage("Running analysis...")
+        self._analysis_worker = AnalysisWorker(self._config, parent=self)
+        self._analysis_worker.status.connect(self._on_analysis_status)
+        self._analysis_worker.finished.connect(self._on_analysis_done)
+        self._analysis_worker.error.connect(self._on_analysis_error)
+        self._analysis_worker.start()
+
+    def _on_analysis_status(self, msg: str):
+        self._statusbar.showMessage(msg)
+
+    def _on_analysis_done(
+        self,
+        audio: AudioAnalysis,
+        segments: list[VideoSegment],
+        cut_plan: CutPlan,
+        source_fps: float,
+    ):
+        self._audio = audio
+        self._segments = segments
+        self._cut_plan = cut_plan
+        self._source_fps = source_fps
+
+        if segments:
+            self._video_duration = segments[-1].end_time
+
+        self._review_page.set_data(audio, cut_plan, self._video_duration)
+
+        if self._config:
+            self._export_page.set_default_output(self._config.video_path)
+
+        self._setup_page.set_analyze_enabled(True)
+        self._statusbar.showMessage(
+            f"Analysis complete: {len(cut_plan.decisions)} clips, "
+            f"{audio.tempo:.0f} BPM"
+        )
+        self._go_page(1)
+
+    def _on_analysis_error(self, msg: str):
+        self._setup_page.set_analyze_enabled(True)
+        self._statusbar.showMessage(f"Analysis error: {msg}")
+
+    # --- Export navigation ---
+
+    def _go_to_export(self, render_settings: dict):
+        if self._config is None or self._cut_plan is None:
+            return
+
+        transition_str = render_settings.get("transition_style", "crossfade")
+        self._config.transition_style = TransitionStyle(transition_str)
+        self._config.crossfade_duration = render_settings.get("crossfade_duration", 0.2)
+        self._config.output_preset = render_settings.get("output_preset", "veryslow")
+        self._config.output_fps = render_settings.get("output_fps", 0)
+        self._config.output_threads = render_settings.get("output_threads", 0)
+
+        edited_clips = self._review_page.get_current_clips()
+        self._cut_plan = CutPlan(
+            decisions=edited_clips,
+            total_duration=self._cut_plan.total_duration,
+            song_tempo=self._cut_plan.song_tempo,
+            transition_style=self._config.transition_style.value,
+            crossfade_duration=self._config.crossfade_duration,
+            clips_selected=self._cut_plan.clips_selected,
+            score_cv=self._cut_plan.score_cv,
+        )
+
+        self._export_page.reset_status()
+        self._go_page(2)
+
+    # --- Rendering ---
+
+    def _start_export(self, output_path: str, is_davinci: bool):
+        if self._config is None or self._cut_plan is None:
+            return
+
+        self._config.davinci = is_davinci
+        self._config.output_path = Path(output_path)
+
+        self._statusbar.showMessage("Exporting...")
+        self._render_worker = RenderWorker(self._config, self._cut_plan, parent=self)
+        self._render_worker.status.connect(self._on_render_status)
+        self._render_worker.finished.connect(self._on_render_done)
+        self._render_worker.error.connect(self._on_render_error)
+        self._render_worker.start()
+
+    def _on_render_status(self, msg: str):
+        self._statusbar.showMessage(msg)
+        self._export_page.set_status(msg)
+
+    def _on_render_done(self, output_path: str):
+        self._statusbar.showMessage(f"Export complete: {output_path}")
+        self._export_page.set_finished(output_path)
+
+    def _on_render_error(self, msg: str):
+        self._statusbar.showMessage(f"Export error: {msg}")
+        self._export_page.set_error(msg)

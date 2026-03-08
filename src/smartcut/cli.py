@@ -178,3 +178,17 @@ def analyze(
                 f"edge={seg.interest.edge_variance:.2f} "
                 f"bright={seg.interest.brightness_change:.2f})"
             )
+
+
+@app.command(name="ui")
+def launch_ui():
+    """Launch the SmartCut graphical interface."""
+    try:
+        from smartcut.ui.app import launch
+    except ImportError:
+        console.print(
+            "[bold red]Error:[/] PySide6 is required for the UI.\n"
+            "Install it with: pip install 'smartcut[ui]'"
+        )
+        raise typer.Exit(code=1)
+    launch()
