@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSlider,
     QStyle,
+    QStyleOptionSlider,
     QVBoxLayout,
     QWidget,
 )
@@ -46,11 +47,20 @@ class ClickSlider(QSlider):
         super().paintEvent(event)
         if not self._marks:
             return
+        opt = QStyleOptionSlider()
+        self.initStyleOption(opt)
+        groove = self.style().subControlRect(
+            QStyle.CC_Slider, opt, QStyle.SC_SliderGroove, self,
+        )
+        handle_len = self.style().pixelMetric(QStyle.PM_SliderLength, opt, self)
+        available = groove.width() - handle_len
+        offset = groove.left() + handle_len // 2
+
         painter = QPainter(self)
         pen = QPen(QColor("#ff5252"), 2)
         painter.setPen(pen)
         for norm in self._marks:
-            x = int(norm * self.width())
+            x = offset + int(norm * available)
             painter.drawLine(x, 0, x, self.height())
         painter.end()
 
@@ -68,7 +78,7 @@ class VideoPlayer(QWidget):
 
         self._duration_ms = 0
         self._fps = 30.0  # overwritten with real source FPS in load_video()
-        self._playing = False
+        self._want_play = False  # desired play/pause state (user intent)
         self._seeking = False
 
         self._player.positionChanged.connect(self._on_position_changed)
@@ -101,19 +111,28 @@ class VideoPlayer(QWidget):
     def set_marks(self, timestamps: list[float]):
         self._slider.set_marks(timestamps, self.duration)
 
+    def seek_to(self, seconds: float):
+        self._seek(int(seconds * 1000))
+
     def toggle_play(self):
-        if self._playing:
+        if self._want_play:
             self.pause()
         else:
             self.play()
 
     def play(self):
+        self._want_play = True
+        self._btn_play.setText("Pause")
         self._player.play()
 
     def pause(self):
+        self._want_play = False
+        self._btn_play.setText("Play")
         self._player.pause()
 
     def stop(self):
+        self._want_play = False
+        self._btn_play.setText("Play")
         self._player.stop()
 
     # --- UI construction ---
@@ -152,19 +171,41 @@ class VideoPlayer(QWidget):
         self._btn_start.setToolTip("Go to start")
         self._btn_start.clicked.connect(self._go_start)
 
-        self._btn_prev = QPushButton("\u23EA")    # ⏪
+        self._btn_jump_back = QPushButton("\u25C1\u25C1")  # ◁◁
+        self._btn_jump_back.setStyleSheet(btn_style)
+        self._btn_jump_back.setToolTip("Jump back 5 s")
+        self._btn_jump_back.setAutoRepeat(True)
+        self._btn_jump_back.setAutoRepeatDelay(400)
+        self._btn_jump_back.setAutoRepeatInterval(200)
+        self._btn_jump_back.clicked.connect(self._jump_back)
+
+        self._btn_prev = QPushButton("\u25C1")    # ◁
         self._btn_prev.setStyleSheet(btn_style)
         self._btn_prev.setToolTip("Step back 1 frame")
+        self._btn_prev.setAutoRepeat(True)
+        self._btn_prev.setAutoRepeatDelay(400)
+        self._btn_prev.setAutoRepeatInterval(80)
         self._btn_prev.clicked.connect(self._step_back)
 
         self._btn_play = QPushButton("Play")
         self._btn_play.setStyleSheet(play_style)
         self._btn_play.clicked.connect(self.toggle_play)
 
-        self._btn_next = QPushButton("\u23E9")    # ⏩
+        self._btn_next = QPushButton("\u25B7")    # ▷
         self._btn_next.setStyleSheet(btn_style)
         self._btn_next.setToolTip("Step forward 1 frame")
+        self._btn_next.setAutoRepeat(True)
+        self._btn_next.setAutoRepeatDelay(400)
+        self._btn_next.setAutoRepeatInterval(80)
         self._btn_next.clicked.connect(self._step_forward)
+
+        self._btn_jump_fwd = QPushButton("\u25B7\u25B7")  # ▷▷
+        self._btn_jump_fwd.setStyleSheet(btn_style)
+        self._btn_jump_fwd.setToolTip("Jump forward 5 s")
+        self._btn_jump_fwd.setAutoRepeat(True)
+        self._btn_jump_fwd.setAutoRepeatDelay(400)
+        self._btn_jump_fwd.setAutoRepeatInterval(200)
+        self._btn_jump_fwd.clicked.connect(self._jump_forward)
 
         self._btn_end = QPushButton("\u23ED")     # ⏭
         self._btn_end.setStyleSheet(btn_style)
@@ -174,10 +215,13 @@ class VideoPlayer(QWidget):
         self._time_label = QLabel("00:00.00 / 00:00.00")
         self._time_label.setStyleSheet("font-size: 14px; font-family: monospace; min-width: 170px;")
 
+        controls.addStretch()
         controls.addWidget(self._btn_start)
+        controls.addWidget(self._btn_jump_back)
         controls.addWidget(self._btn_prev)
         controls.addWidget(self._btn_play)
         controls.addWidget(self._btn_next)
+        controls.addWidget(self._btn_jump_fwd)
         controls.addWidget(self._btn_end)
         controls.addStretch()
         controls.addWidget(self._time_label)
@@ -199,12 +243,9 @@ class VideoPlayer(QWidget):
         self.position_changed.emit(position_ms / 1000.0)
 
     def _on_state_changed(self, state):
-        if state == QMediaPlayer.PlaybackState.PlayingState:
-            self._playing = True
-            self._btn_play.setText("Pause")
-        else:
-            self._playing = False
-            self._btn_play.setText("Play")
+        # Only update UI from actual user-driven state changes.
+        # Ignore transient states caused by setPosition() seeks.
+        pass
 
     def _on_media_status(self, status):
         # Show first frame once media is loaded
@@ -216,11 +257,17 @@ class VideoPlayer(QWidget):
 
     # --- seeking ---
 
+    def _seek(self, position_ms: int):
+        """Seek to *position_ms* and resume playback if the user intended it."""
+        self._player.setPosition(position_ms)
+        if self._want_play:
+            self._player.play()
+
     def _on_slider_pressed(self):
         self._seeking = True
 
     def _on_slider_released(self):
-        self._player.setPosition(self._slider.value())
+        self._seek(self._slider.value())
         self._seeking = False
 
     def _on_slider_moved(self, value: int):
@@ -229,26 +276,24 @@ class VideoPlayer(QWidget):
     # --- transport buttons ---
 
     def _go_start(self):
-        self.pause()
-        self._player.setPosition(0)
+        self._seek(0)
 
     def _go_end(self):
-        self.pause()
-        self._player.setPosition(max(0, self._duration_ms - 100))
+        self._seek(max(0, self._duration_ms - 100))
+
+    def _jump_forward(self):
+        self._seek(min(self._player.position() + 5000, self._duration_ms))
+
+    def _jump_back(self):
+        self._seek(max(self._player.position() - 5000, 0))
 
     def _step_forward(self):
-        if self._playing:
-            self.pause()
         frame_ms = int(1000.0 / self._fps)
-        new_pos = min(self._player.position() + frame_ms, self._duration_ms)
-        self._player.setPosition(new_pos)
+        self._seek(min(self._player.position() + frame_ms, self._duration_ms))
 
     def _step_back(self):
-        if self._playing:
-            self.pause()
         frame_ms = int(1000.0 / self._fps)
-        new_pos = max(self._player.position() - frame_ms, 0)
-        self._player.setPosition(new_pos)
+        self._seek(max(self._player.position() - frame_ms, 0))
 
     # --- helpers ---
 
@@ -261,6 +306,13 @@ class VideoPlayer(QWidget):
     def _fmt(seconds: float) -> str:
         m, s = divmod(seconds, 60)
         return f"{int(m):02d}:{s:05.2f}"
+
+    def wheelEvent(self, event):
+        delta = event.angleDelta().y()  # typically ±120 per notch
+        step_ms = int(delta / 120 * 1000)  # 1 s per notch
+        new_pos = max(0, min(self._player.position() + step_ms, self._duration_ms))
+        self._seek(new_pos)
+        event.accept()
 
     def closeEvent(self, event):
         self._player.stop()

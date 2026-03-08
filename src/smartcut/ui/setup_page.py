@@ -1,18 +1,18 @@
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QListWidget,
-    QListWidgetItem,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QTabWidget,
     QVBoxLayout,
@@ -37,6 +37,7 @@ class SetupPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._marks: list[float] = []
+        self._selected_mark_index: int = -1
         self._build_ui()
 
     def _build_ui(self):
@@ -84,15 +85,31 @@ class SetupPage(QWidget):
         marks_btns = QHBoxLayout()
         btn_add_mark = QPushButton("+ Add Mark at Current Position")
         btn_add_mark.clicked.connect(self._add_mark)
+        self._btn_remove_mark = QPushButton("\u2715 Remove")
+        self._btn_remove_mark.setEnabled(False)
+        self._btn_remove_mark.clicked.connect(self._remove_mark)
         btn_clear_marks = QPushButton("Clear All")
         btn_clear_marks.clicked.connect(self._clear_marks)
         marks_btns.addWidget(btn_add_mark)
+        marks_btns.addWidget(self._btn_remove_mark)
         marks_btns.addWidget(btn_clear_marks)
         marks_btns.addStretch()
         marks_layout.addLayout(marks_btns)
 
-        self._marks_list = QListWidget()
-        marks_layout.addWidget(self._marks_list)
+        # Horizontal scrollable chip area
+        self._marks_scroll = QScrollArea()
+        self._marks_scroll.setWidgetResizable(True)
+        self._marks_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._marks_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._marks_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self._marks_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        self._marks_container = QWidget()
+        self._marks_chip_layout = QHBoxLayout(self._marks_container)
+        self._marks_chip_layout.setContentsMargins(0, 0, 0, 0)
+        self._marks_chip_layout.setSpacing(6)
+        self._marks_chip_layout.addStretch()
+        self._marks_scroll.setWidget(self._marks_container)
+        marks_layout.addWidget(self._marks_scroll)
         tabs.addTab(marks_tab, "Marks")
 
         # Settings tab — compact 2-column form
@@ -144,17 +161,35 @@ class SetupPage(QWidget):
         settings_outer.addStretch()
 
         tabs.addTab(settings_tab, "Settings")
-        root.addWidget(tabs)
 
-        # --- Analyze button ---
-        btn_row = QHBoxLayout()
-        btn_row.addStretch()
+        # Tabs + Analyze button side by side
+        bottom_row = QHBoxLayout()
+        bottom_row.setSpacing(8)
+        bottom_row.addWidget(tabs, stretch=1)
+
         self._btn_analyze = QPushButton("Analyze")
         self._btn_analyze.setProperty("primary", True)
+        self._btn_analyze.setEnabled(False)
         self._btn_analyze.clicked.connect(self._on_analyze)
-        btn_row.addWidget(self._btn_analyze)
-        btn_row.addStretch()
-        root.addLayout(btn_row)
+        bottom_row.addWidget(self._btn_analyze, alignment=Qt.AlignBottom)
+
+        root.addLayout(bottom_row)
+
+        # Enable Analyze only when both paths are set
+        self._video_path.textChanged.connect(self._update_analyze_enabled)
+        self._audio_path.textChanged.connect(self._update_analyze_enabled)
+
+        # Keyboard shortcuts
+        ctx = Qt.WidgetWithChildrenShortcut
+        QShortcut(Qt.Key_Space, self, self._player.toggle_play, context=ctx)
+        QShortcut(Qt.Key_Left, self, self._player._step_back, context=ctx)
+        QShortcut(Qt.Key_Right, self, self._player._step_forward, context=ctx)
+        QShortcut(Qt.Key_Up, self, self._player._jump_forward, context=ctx)
+        QShortcut(Qt.Key_Down, self, self._player._jump_back, context=ctx)
+        QShortcut(Qt.Key_Home, self, self._player._go_start, context=ctx)
+        QShortcut(Qt.Key_End, self, self._player._go_end, context=ctx)
+        QShortcut(Qt.Key_A, self, self._add_mark, context=ctx)
+        QShortcut(Qt.Key_D, self, self._remove_mark, context=ctx)
 
     # --- File browsing ---
 
@@ -182,13 +217,55 @@ class SetupPage(QWidget):
 
     def _clear_marks(self):
         self._marks.clear()
+        self._selected_mark_index = -1
+        self._btn_remove_mark.setEnabled(False)
+        self._refresh_marks_ui()
+
+    def _remove_mark(self):
+        if 0 <= self._selected_mark_index < len(self._marks):
+            del self._marks[self._selected_mark_index]
+            self._selected_mark_index = -1
+            self._btn_remove_mark.setEnabled(False)
+            self._refresh_marks_ui()
+
+    def _select_mark(self, index: int):
+        if self._selected_mark_index == index:
+            self._selected_mark_index = -1
+            self._btn_remove_mark.setEnabled(False)
+        else:
+            self._selected_mark_index = index
+            self._btn_remove_mark.setEnabled(True)
+            self._player.seek_to(self._marks[index])
         self._refresh_marks_ui()
 
     def _refresh_marks_ui(self):
-        self._marks_list.clear()
-        for t in self._marks:
+        # Clear existing chips
+        while self._marks_chip_layout.count():
+            item = self._marks_chip_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        chip_style = (
+            "QPushButton { border-radius: 12px; padding: 4px 10px;"
+            " font-family: monospace; font-size: 13px;"
+            " background: #3a3a3a; color: #e0e0e0; border: 1px solid #555; }"
+            " QPushButton:hover { background: #4a4a4a; }"
+        )
+        selected_style = (
+            "QPushButton { border-radius: 12px; padding: 4px 10px;"
+            " font-family: monospace; font-size: 13px;"
+            " background: #2196F3; color: #fff; border: 1px solid #2196F3; }"
+        )
+
+        for i, t in enumerate(self._marks):
             m, s = divmod(t, 60)
-            self._marks_list.addItem(QListWidgetItem(f"{int(m):02d}:{s:05.2f}"))
+            chip = QPushButton(f"{int(m):02d}:{s:05.2f}")
+            chip.setCursor(Qt.PointingHandCursor)
+            chip.setStyleSheet(selected_style if i == self._selected_mark_index else chip_style)
+            chip.clicked.connect(lambda checked, idx=i: self._select_mark(idx))
+            self._marks_chip_layout.addWidget(chip)
+
+        self._marks_chip_layout.addStretch()
         self._player.set_marks(self._marks)
 
     # --- Analyze ---
@@ -213,9 +290,17 @@ class SetupPage(QWidget):
             "include_timestamps": list(self._marks),
         })
 
+    def _update_analyze_enabled(self):
+        has_both = bool(self._video_path.text().strip()) and bool(self._audio_path.text().strip())
+        self._btn_analyze.setEnabled(has_both)
+
     def set_analyze_enabled(self, enabled: bool):
-        self._btn_analyze.setEnabled(enabled)
-        self._btn_analyze.setText("Analyze" if enabled else "Analyzing...")
+        if enabled:
+            self._btn_analyze.setText("Analyze")
+            self._update_analyze_enabled()
+        else:
+            self._btn_analyze.setEnabled(False)
+            self._btn_analyze.setText("Analyzing...")
 
     @property
     def video_path(self) -> str:

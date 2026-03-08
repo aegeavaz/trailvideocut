@@ -23,9 +23,9 @@ QPushButton {
     background-color: #3c3c3c;
     border: 1px solid #555;
     border-radius: 4px;
-    padding: 6px 14px;
+    padding: 4px 14px;
     color: #e0e0e0;
-    min-height: 28px;
+    min-height: 24px;
     font-size: 13px;
 }
 QPushButton:hover { background-color: #4a4a4a; }
@@ -38,8 +38,8 @@ QPushButton[primary="true"] {
     color: white;
     font-weight: bold;
     font-size: 15px;
-    padding: 10px 32px;
-    min-height: 34px;
+    padding: 6px 24px;
+    min-height: 28px;
 }
 QPushButton[primary="true"]:hover { background-color: #42A5F5; }
 QPushButton[primary="true"]:disabled { background-color: #444; color: #777; }
