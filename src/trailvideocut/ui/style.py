@@ -73,6 +73,59 @@ QDoubleSpinBox, QSpinBox, QComboBox, QLineEdit {
     min-height: 24px;
     font-size: 13px;
 }
+QSpinBox::up-button, QDoubleSpinBox::up-button {
+    subcontrol-origin: border;
+    subcontrol-position: top right;
+    width: 20px;
+    border-left: 1px solid #555;
+    border-bottom: 1px solid #555;
+    border-top-right-radius: 3px;
+    background-color: #3c3c3c;
+}
+QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover {
+    background-color: #4a4a4a;
+}
+QSpinBox::up-button:pressed, QDoubleSpinBox::up-button:pressed {
+    background-color: #555;
+}
+QSpinBox::down-button, QDoubleSpinBox::down-button {
+    subcontrol-origin: border;
+    subcontrol-position: bottom right;
+    width: 20px;
+    border-left: 1px solid #555;
+    border-top: 1px solid #555;
+    border-bottom-right-radius: 3px;
+    background-color: #3c3c3c;
+}
+QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {
+    background-color: #4a4a4a;
+}
+QSpinBox::down-button:pressed, QDoubleSpinBox::down-button:pressed {
+    background-color: #555;
+}
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
+    image: none;
+    width: 0;
+    height: 0;
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-bottom: 5px solid #e0e0e0;
+}
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
+    image: none;
+    width: 0;
+    height: 0;
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-top: 5px solid #e0e0e0;
+}
+QToolTip {
+    background-color: #3c3c3c;
+    color: #e0e0e0;
+    border: 1px solid #555;
+    padding: 4px 6px;
+    font-size: 13px;
+}
 QComboBox::drop-down { border: none; width: 22px; }
 QComboBox QAbstractItemView {
     background-color: #3c3c3c;

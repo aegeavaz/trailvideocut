@@ -133,18 +133,21 @@ class SetupPage(QWidget):
         self._analysis_fps.setRange(0.5, 30.0)
         self._analysis_fps.setValue(3.0)
         self._analysis_fps.setSingleStep(0.5)
+        self._analysis_fps.setToolTip("Frames per second sampled during analysis. Higher = more accurate but slower.")
         col1.addRow("Analysis FPS:", self._analysis_fps)
 
         self._segment_hop = QDoubleSpinBox()
         self._segment_hop.setRange(0.1, 5.0)
         self._segment_hop.setValue(0.5)
         self._segment_hop.setSingleStep(0.1)
+        self._segment_hop.setToolTip("Step size in seconds for the sliding analysis window. Smaller = finer detection but slower.")
         col1.addRow("Segment Hop (s):", self._segment_hop)
 
         self._min_segment = QDoubleSpinBox()
         self._min_segment.setRange(0.5, 30.0)
         self._min_segment.setValue(1.0)
         self._min_segment.setSingleStep(0.5)
+        self._min_segment.setToolTip("Minimum clip duration in seconds. Clips shorter than this are discarded.")
         col1.addRow("Min Segment (s):", self._min_segment)
 
         settings_outer.addLayout(col1)
@@ -155,16 +158,19 @@ class SetupPage(QWidget):
         self._max_segment.setRange(1.0, 60.0)
         self._max_segment.setValue(8.0)
         self._max_segment.setSingleStep(1.0)
+        self._max_segment.setToolTip("Maximum clip duration in seconds. Longer segments are split.")
         col2.addRow("Max Segment (s):", self._max_segment)
 
         self._gpu_check = QCheckBox("Enabled")
         self._gpu_check.setChecked(True)
+        self._gpu_check.setToolTip("Use GPU acceleration for video analysis (requires NVIDIA GPU).")
         col2.addRow("GPU:", self._gpu_check)
 
         self._gpu_batch = QSpinBox()
         self._gpu_batch.setRange(8, 512)
         self._gpu_batch.setValue(64)
         self._gpu_batch.setSingleStep(16)
+        self._gpu_batch.setToolTip("Frames processed simultaneously on GPU. Higher = faster but uses more VRAM.")
         col2.addRow("GPU Batch:", self._gpu_batch)
 
         settings_outer.addLayout(col2)
