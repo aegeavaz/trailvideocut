@@ -67,7 +67,10 @@ class TimelineWidget(QWidget):
         if 0 <= index < len(self._clips):
             self._selected = index
             self.clip_selected.emit(index)
-            self.update()
+        else:
+            self._selected = -1
+            self.clip_selected.emit(-1)
+        self.update()
 
     @property
     def clips(self) -> list[EditDecision]:

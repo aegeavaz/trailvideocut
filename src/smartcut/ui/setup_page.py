@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
@@ -10,6 +11,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -34,6 +36,7 @@ class SetupPage(QWidget):
     """
 
     analyze_requested = Signal(dict)
+    go_to_review_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -91,9 +94,15 @@ class SetupPage(QWidget):
         self._btn_remove_mark.clicked.connect(self._remove_mark)
         btn_clear_marks = QPushButton("Clear All")
         btn_clear_marks.clicked.connect(self._clear_marks)
+        btn_save_marks = QPushButton("Save Marks")
+        btn_save_marks.clicked.connect(self._save_marks)
+        btn_load_marks = QPushButton("Load Marks")
+        btn_load_marks.clicked.connect(self._load_marks)
         marks_btns.addWidget(btn_add_mark)
         marks_btns.addWidget(self._btn_remove_mark)
         marks_btns.addWidget(btn_clear_marks)
+        marks_btns.addWidget(btn_save_marks)
+        marks_btns.addWidget(btn_load_marks)
         marks_btns.addStretch()
         marks_layout.addLayout(marks_btns)
 
@@ -175,11 +184,18 @@ class SetupPage(QWidget):
         bottom_row.setSpacing(8)
         bottom_row.addWidget(tabs, stretch=1)
 
+        right_btns = QVBoxLayout()
+        self._btn_go_review = QPushButton("Go to Review >>")
+        self._btn_go_review.setProperty("primary", True)
+        self._btn_go_review.clicked.connect(self.go_to_review_requested.emit)
+        self._btn_go_review.hide()
         self._btn_analyze = QPushButton("Analyze")
         self._btn_analyze.setProperty("primary", True)
         self._btn_analyze.setEnabled(False)
         self._btn_analyze.clicked.connect(self._on_analyze)
-        bottom_row.addWidget(self._btn_analyze, alignment=Qt.AlignBottom)
+        right_btns.addWidget(self._btn_go_review)
+        right_btns.addWidget(self._btn_analyze)
+        bottom_row.addLayout(right_btns)
 
         root.addLayout(bottom_row)
 
@@ -276,6 +292,41 @@ class SetupPage(QWidget):
         self._marks_chip_layout.addStretch()
         self._player.set_marks(self._marks)
 
+    # --- Save / Load marks ---
+
+    def _save_marks(self):
+        if not self._marks or not self._video_path.text().strip():
+            return
+        video = Path(self._video_path.text().strip())
+        out_path = video.parent / (video.stem + ".marks.json")
+        try:
+            out_path.write_text(json.dumps(self._marks, indent=2))
+        except Exception as exc:
+            QMessageBox.warning(self, "Save Error", str(exc))
+
+    def _load_marks(self):
+        default_dir = ""
+        if self._video_path.text().strip():
+            default_dir = str(Path(self._video_path.text().strip()).parent)
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load Marks",
+            default_dir,
+            "Marks Files (*.marks.json);;JSON Files (*.json);;All Files (*)",
+        )
+        if not path:
+            return
+        try:
+            data = json.loads(Path(path).read_text())
+            if not isinstance(data, list) or not all(isinstance(v, (int, float)) for v in data):
+                raise ValueError("File must contain a JSON list of numbers")
+            self._marks = sorted(float(v) for v in data)
+            self._selected_mark_index = -1
+            self._btn_remove_mark.setEnabled(False)
+            self._refresh_marks_ui()
+        except Exception as exc:
+            QMessageBox.warning(self, "Load Error", str(exc))
+
     # --- Analyze ---
 
     def _on_analyze(self):
@@ -323,12 +374,17 @@ class SetupPage(QWidget):
 
     def set_analyze_enabled(self, enabled: bool):
         if enabled:
-            self._btn_analyze.setText("Analyze")
+            label = "Reanalyze" if self._btn_go_review.isVisible() else "Analyze"
+            self._btn_analyze.setText(label)
             self._update_analyze_enabled()
             self.reset_progress()
         else:
             self._btn_analyze.setEnabled(False)
             self._btn_analyze.setText("Analyzing...")
+
+    def show_go_to_review(self, visible: bool):
+        self._btn_go_review.setVisible(visible)
+        self._btn_analyze.setText("Reanalyze" if visible else "Analyze")
 
     @property
     def video_path(self) -> str:

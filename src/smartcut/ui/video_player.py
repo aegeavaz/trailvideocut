@@ -69,6 +69,7 @@ class VideoPlayer(QWidget):
     """QMediaPlayer-based video player with audio support."""
 
     position_changed = Signal(float)  # current time in seconds
+    user_seeked = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -263,11 +264,16 @@ class VideoPlayer(QWidget):
         if self._want_play:
             self._player.play()
 
+    def _user_seek(self, position_ms: int):
+        """Seek triggered by user interaction — emits user_seeked."""
+        self._seek(position_ms)
+        self.user_seeked.emit()
+
     def _on_slider_pressed(self):
         self._seeking = True
 
     def _on_slider_released(self):
-        self._seek(self._slider.value())
+        self._user_seek(self._slider.value())
         self._seeking = False
 
     def _on_slider_moved(self, value: int):
@@ -276,24 +282,24 @@ class VideoPlayer(QWidget):
     # --- transport buttons ---
 
     def _go_start(self):
-        self._seek(0)
+        self._user_seek(0)
 
     def _go_end(self):
-        self._seek(max(0, self._duration_ms - 100))
+        self._user_seek(max(0, self._duration_ms - 100))
 
     def _jump_forward(self):
-        self._seek(min(self._player.position() + 5000, self._duration_ms))
+        self._user_seek(min(self._player.position() + 5000, self._duration_ms))
 
     def _jump_back(self):
-        self._seek(max(self._player.position() - 5000, 0))
+        self._user_seek(max(self._player.position() - 5000, 0))
 
     def _step_forward(self):
         frame_ms = int(1000.0 / self._fps)
-        self._seek(min(self._player.position() + frame_ms, self._duration_ms))
+        self._user_seek(min(self._player.position() + frame_ms, self._duration_ms))
 
     def _step_back(self):
         frame_ms = int(1000.0 / self._fps)
-        self._seek(max(self._player.position() - frame_ms, 0))
+        self._user_seek(max(self._player.position() - frame_ms, 0))
 
     # --- helpers ---
 
@@ -311,7 +317,7 @@ class VideoPlayer(QWidget):
         delta = event.angleDelta().y()  # typically ±120 per notch
         step_ms = int(delta / 120 * 1000)  # 1 s per notch
         new_pos = max(0, min(self._player.position() + step_ms, self._duration_ms))
-        self._seek(new_pos)
+        self._user_seek(new_pos)
         event.accept()
 
     def closeEvent(self, event):

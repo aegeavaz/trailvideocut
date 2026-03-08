@@ -73,7 +73,8 @@ class MainWindow(QMainWindow):
 
     def _connect_signals(self):
         self._setup_page.analyze_requested.connect(self._start_analysis)
-        self._review_page.back_requested.connect(lambda: self._go_page(0))
+        self._setup_page.go_to_review_requested.connect(self._go_to_review_directly)
+        self._review_page.back_requested.connect(self._back_to_setup)
         self._review_page.export_requested.connect(self._go_to_export)
         self._export_page.back_requested.connect(lambda: self._go_page(1))
         self._export_page.start_export.connect(self._start_export)
@@ -81,11 +82,29 @@ class MainWindow(QMainWindow):
     def _go_page(self, index: int):
         self._pages.setCurrentIndex(index)
 
+    def _back_to_setup(self):
+        self._go_page(0)
+        if self._cut_plan is not None:
+            self._setup_page.show_go_to_review(True)
+
+    def _go_to_review_directly(self):
+        if self._audio is None or self._cut_plan is None or self._config is None:
+            return
+        self._review_page.set_data(
+            self._audio,
+            self._cut_plan,
+            self._video_duration,
+            video_path=str(self._config.video_path),
+            marks=list(self._config.include_timestamps),
+        )
+        self._go_page(1)
+
     # --- Analysis ---
 
     def _start_analysis(self, settings: dict):
         self._config = SmartCutConfig(**settings)
         self._video_duration = self._setup_page.video_duration
+        self._setup_page.show_go_to_review(False)
 
         self._statusbar.showMessage("Running analysis...")
         self._analysis_worker = AnalysisWorker(self._config, parent=self)
@@ -126,6 +145,7 @@ class MainWindow(QMainWindow):
             self._export_page.set_default_output(self._config.video_path)
 
         self._setup_page.set_analyze_enabled(True)
+        self._setup_page.show_go_to_review(True)
         self._statusbar.showMessage(
             f"Analysis complete: {len(cut_plan.decisions)} clips, "
             f"{audio.tempo:.0f} BPM"

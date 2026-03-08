@@ -30,6 +30,7 @@ class ReviewPage(QWidget):
         super().__init__(parent)
         self._audio: AudioAnalysis | None = None
         self._sections: list[MusicSection] = []
+        self._active_clip_end: float | None = None
         self._build_ui()
 
     def _build_ui(self):
@@ -134,6 +135,11 @@ class ReviewPage(QWidget):
 
         root.addWidget(main_splitter, stretch=1)
 
+        # Connect playback cursor, user seek deselection, and clip boundary check
+        self._player.position_changed.connect(self._timeline.set_cursor_position)
+        self._player.position_changed.connect(self._check_clip_boundary)
+        self._player.user_seeked.connect(self._on_user_seeked)
+
         # Keyboard shortcuts (same as setup page)
         ctx = Qt.WidgetWithChildrenShortcut
         QShortcut(Qt.Key_Space, self, self._player.toggle_play, context=ctx)
@@ -172,10 +178,9 @@ class ReviewPage(QWidget):
             self._timeline.set_marks(marks)
             self._player.set_marks(marks)
 
-        # Load video and connect playback cursor
+        # Load video
         if video_path:
             self._player.load_video(video_path)
-        self._player.position_changed.connect(self._timeline.set_cursor_position)
 
         # Clip info
         self._clip_info.setText("Click a clip on the timeline to see details")
@@ -183,14 +188,16 @@ class ReviewPage(QWidget):
     def _on_clip_selected(self, index: int):
         if index < 0 or index >= len(self._timeline.clips):
             self._clip_info.setText("No clip selected")
+            self._active_clip_end = None
             return
 
         clip = self._timeline.clips[index]
         duration = clip.source_end - clip.source_start
         target_dur = clip.target_end - clip.target_start
 
-        # Seek video to clip start
+        # Seek video to clip start and set auto-stop boundary
         self._player.seek_to(clip.source_start)
+        self._active_clip_end = clip.source_end
 
         # Find section
         section_label = "unknown"
@@ -211,6 +218,15 @@ class ReviewPage(QWidget):
             f"Score:    {clip.interest_score:.3f}\n\n"
             f"Section:  {section_label} (energy: {section_energy:.2f})"
         )
+
+    def _on_user_seeked(self):
+        if self._timeline.selected_index >= 0:
+            self._timeline.select_clip(-1)
+
+    def _check_clip_boundary(self, position: float):
+        if self._active_clip_end is not None and position >= self._active_clip_end:
+            self._player.pause()
+            self._active_clip_end = None
 
     def _on_clip_moved(self, index: int, new_start: float, new_end: float):
         """Called after a clip is dragged to a new source position."""
