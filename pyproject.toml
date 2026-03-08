@@ -7,7 +7,19 @@ name = "trailvideocut"
 version = "0.1.0"
 description = "TrailVideoCut - Automatically cut motorcycle POV videos to sync with music beats"
 requires-python = ">=3.10"
-license = "MIT"
+readme = "README.md"
+license = "Prosperity-3.0.0"
+authors = [{name = "aegeavaz"}]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Topic :: Multimedia :: Video",
+    "Topic :: Multimedia :: Video :: Non-Linear Editor",
+    "Intended Audience :: End Users/Desktop",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
 dependencies = [
     "librosa>=0.10.0",
     "opencv-python>=4.8.0",
@@ -31,6 +43,11 @@ dev = [
     "pytest-cov>=4.0",
     "ruff>=0.4.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/aegeavaz/trailvideocut"
+Repository = "https://github.com/aegeavaz/trailvideocut"
+"Bug Tracker" = "https://github.com/aegeavaz/trailvideocut/issues"
 
 [project.scripts]
 trailvideocut = "trailvideocut.cli:app"
