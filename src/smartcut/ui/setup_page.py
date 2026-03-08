@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -162,6 +163,13 @@ class SetupPage(QWidget):
 
         tabs.addTab(settings_tab, "Settings")
 
+        # Progress bar (hidden by default)
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setMaximumHeight(16)
+        self._progress_bar.setTextVisible(True)
+        self._progress_bar.hide()
+        root.addWidget(self._progress_bar)
+
         # Tabs + Analyze button side by side
         bottom_row = QHBoxLayout()
         bottom_row.setSpacing(8)
@@ -278,6 +286,8 @@ class SetupPage(QWidget):
 
         self._btn_analyze.setEnabled(False)
         self._btn_analyze.setText("Analyzing...")
+        self._progress_bar.setRange(0, 0)  # indeterminate
+        self._progress_bar.show()
         self.analyze_requested.emit({
             "video_path": Path(video),
             "audio_path": Path(audio),
@@ -294,10 +304,28 @@ class SetupPage(QWidget):
         has_both = bool(self._video_path.text().strip()) and bool(self._audio_path.text().strip())
         self._btn_analyze.setEnabled(has_both)
 
+    def set_progress(self, current: int, total: int):
+        if total > 0:
+            self._progress_bar.setRange(0, total)
+            self._progress_bar.setValue(current)
+        self._progress_bar.show()
+
+    def set_progress_status(self, message: str):
+        self._progress_bar.setFormat(f"{message}  %p%")
+        self._progress_bar.setRange(0, 0)  # indeterminate until progress arrives
+        self._progress_bar.show()
+
+    def reset_progress(self):
+        self._progress_bar.hide()
+        self._progress_bar.setRange(0, 1)
+        self._progress_bar.setValue(0)
+        self._progress_bar.setFormat("%p%")
+
     def set_analyze_enabled(self, enabled: bool):
         if enabled:
             self._btn_analyze.setText("Analyze")
             self._update_analyze_enabled()
+            self.reset_progress()
         else:
             self._btn_analyze.setEnabled(False)
             self._btn_analyze.setText("Analyzing...")

@@ -90,12 +90,14 @@ class MainWindow(QMainWindow):
         self._statusbar.showMessage("Running analysis...")
         self._analysis_worker = AnalysisWorker(self._config, parent=self)
         self._analysis_worker.status.connect(self._on_analysis_status)
+        self._analysis_worker.progress.connect(self._setup_page.set_progress)
         self._analysis_worker.finished.connect(self._on_analysis_done)
         self._analysis_worker.error.connect(self._on_analysis_error)
         self._analysis_worker.start()
 
     def _on_analysis_status(self, msg: str):
         self._statusbar.showMessage(msg)
+        self._setup_page.set_progress_status(msg)
 
     def _on_analysis_done(
         self,
@@ -112,7 +114,13 @@ class MainWindow(QMainWindow):
         if segments:
             self._video_duration = segments[-1].end_time
 
-        self._review_page.set_data(audio, cut_plan, self._video_duration)
+        self._review_page.set_data(
+            audio,
+            cut_plan,
+            self._video_duration,
+            video_path=str(self._config.video_path),
+            marks=list(self._config.include_timestamps),
+        )
 
         if self._config:
             self._export_page.set_default_output(self._config.video_path)
@@ -125,7 +133,7 @@ class MainWindow(QMainWindow):
         self._go_page(1)
 
     def _on_analysis_error(self, msg: str):
-        self._setup_page.set_analyze_enabled(True)
+        self._setup_page.set_analyze_enabled(True)  # also resets progress bar
         self._statusbar.showMessage(f"Analysis error: {msg}")
 
     # --- Export navigation ---
@@ -167,6 +175,7 @@ class MainWindow(QMainWindow):
         self._statusbar.showMessage("Exporting...")
         self._render_worker = RenderWorker(self._config, self._cut_plan, parent=self)
         self._render_worker.status.connect(self._on_render_status)
+        self._render_worker.progress.connect(self._export_page.set_progress)
         self._render_worker.finished.connect(self._on_render_done)
         self._render_worker.error.connect(self._on_render_error)
         self._render_worker.start()

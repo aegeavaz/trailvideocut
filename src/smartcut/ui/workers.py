@@ -18,6 +18,7 @@ class AnalysisWorker(QThread):
     """Runs audio/video analysis and segment selection in a background thread."""
 
     status = Signal(str)
+    progress = Signal(int, int)  # current, total
     audio_done = Signal(object)  # AudioAnalysis
     video_done = Signal(object, float)  # list[VideoSegment], source_fps
     finished = Signal(object, object, object, float)  # AudioAnalysis, segments, CutPlan, fps
@@ -85,7 +86,17 @@ class AnalysisWorker(QThread):
         return analysis
 
     def _analyze_video(self) -> tuple[list[VideoSegment], float]:
-        analyzer = VideoAnalyzer(self._config)
+        def _progress_cb(current: int, total: int) -> None:
+            self.progress.emit(current, total)
+
+        def _status_cb(message: str) -> None:
+            self.status.emit(message)
+
+        analyzer = VideoAnalyzer(
+            self._config,
+            progress_callback=_progress_cb,
+            status_callback=_status_cb,
+        )
         segments = analyzer.analyze()
         return segments, analyzer.source_fps
 
@@ -94,6 +105,7 @@ class RenderWorker(QThread):
     """Runs video assembly or OTIO export in a background thread."""
 
     status = Signal(str)
+    progress = Signal(int, int)  # current, total
     finished = Signal(str)  # output path
     error = Signal(str)
 
@@ -113,7 +125,11 @@ class RenderWorker(QThread):
                 self.finished.emit(str(path))
             else:
                 self.status.emit("Assembling video with FFmpeg...")
-                assembler = VideoAssembler(self._config)
+
+                def _progress_cb(current: int, total: int) -> None:
+                    self.progress.emit(current, total)
+
+                assembler = VideoAssembler(self._config, progress_callback=_progress_cb)
                 assembler.assemble(self._cut_plan)
                 self.finished.emit(str(self._config.output_path))
         except Exception as e:

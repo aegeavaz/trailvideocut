@@ -23,6 +23,7 @@ class ExportPage(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._source_video_dir: Path | None = None
         self._build_ui()
 
     def _build_ui(self):
@@ -43,9 +44,17 @@ class ExportPage(QWidget):
 
         self._radio_video = QRadioButton("Render Video (MP4)")
         self._radio_video.setChecked(True)
+        mp4_desc = QLabel("Encode a standalone MP4 video file with audio using FFmpeg")
+        mp4_desc.setStyleSheet("color: #888; font-size: 11px; margin-left: 22px;")
         self._radio_davinci = QRadioButton("DaVinci Resolve OTIO")
+        otio_desc = QLabel("Export an OpenTimelineIO project for editing in DaVinci Resolve")
+        otio_desc.setStyleSheet("color: #888; font-size: 11px; margin-left: 22px;")
         format_layout.addWidget(self._radio_video)
+        format_layout.addWidget(mp4_desc)
         format_layout.addWidget(self._radio_davinci)
+        format_layout.addWidget(otio_desc)
+
+        self._radio_davinci.toggled.connect(lambda: self._update_output_for_format())
 
         root.addWidget(format_group)
 
@@ -87,10 +96,15 @@ class ExportPage(QWidget):
 
     def _browse_output(self):
         if self._radio_davinci.isChecked():
-            path = QFileDialog.getExistingDirectory(self, "Select Output Folder")
-        else:
+            initial = self._output_path.text().strip() or "project.otio"
             path, _ = QFileDialog.getSaveFileName(
-                self, "Save Video As", "output.mp4",
+                self, "Save OTIO As", initial,
+                "OpenTimelineIO (*.otio);;All Files (*)",
+            )
+        else:
+            initial = self._output_path.text().strip() or "output.mp4"
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Save Video As", initial,
                 "MP4 Video (*.mp4);;All Files (*)",
             )
         if path:
@@ -102,6 +116,14 @@ class ExportPage(QWidget):
             self._status_label.setText("Please select an output path.")
             return
         is_davinci = self._radio_davinci.isChecked()
+        if not is_davinci:
+            from smartcut.gpu import _find_ffmpeg
+            if _find_ffmpeg() is None:
+                self.set_error(
+                    "FFmpeg not found. Install FFmpeg and add it to your system PATH.\n"
+                    "Download: https://ffmpeg.org/download.html"
+                )
+                return
         self._btn_start.setEnabled(False)
         self._progress_bar.setVisible(True)
         self._status_label.setText("Starting export...")
@@ -109,8 +131,22 @@ class ExportPage(QWidget):
 
     def set_default_output(self, video_path: Path):
         """Set default output path based on the video file location."""
-        parent = video_path.parent
-        self._output_path.setText(str(parent / "output.mp4"))
+        self._source_video_dir = video_path.parent
+        self._update_output_for_format()
+
+    def _update_output_for_format(self):
+        """Update the output path field to match the selected export format."""
+        if self._source_video_dir is None:
+            return
+        if self._radio_davinci.isChecked():
+            self._output_path.setText(str(self._source_video_dir / "project.otio"))
+        else:
+            self._output_path.setText(str(self._source_video_dir / "output.mp4"))
+
+    def set_progress(self, current: int, total: int):
+        """Update progress bar with real encoding progress."""
+        self._progress_bar.setRange(0, total)
+        self._progress_bar.setValue(current)
 
     def set_status(self, message: str):
         self._status_label.setText(message)
@@ -130,5 +166,6 @@ class ExportPage(QWidget):
     def reset_status(self):
         self._status_label.setText("")
         self._status_label.setStyleSheet("color: #aaa; padding: 4px;")
+        self._progress_bar.setRange(0, 0)  # reset to indeterminate
         self._progress_bar.setVisible(False)
         self._btn_start.setEnabled(True)

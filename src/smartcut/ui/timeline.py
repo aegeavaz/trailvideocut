@@ -1,18 +1,8 @@
-from PySide6.QtCore import QRectF, Qt, Signal
-from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
-from smartcut.audio.models import MusicSection
 from smartcut.editor.models import EditDecision
-
-# Section label → background color
-_SECTION_COLORS = {
-    "chorus": QColor(60, 80, 60),
-    "verse": QColor(50, 55, 70),
-    "bridge": QColor(70, 55, 60),
-    "intro": QColor(50, 60, 65),
-    "outro": QColor(55, 50, 65),
-}
 
 _MARGIN_LEFT = 50
 _MARGIN_RIGHT = 10
@@ -34,16 +24,17 @@ class TimelineWidget(QWidget):
     clip_moved = Signal(int, float, float)  # index, new_source_start, new_source_end
 
     RULER_HEIGHT = 28
-    SECTION_HEIGHT = 18
+    SECTION_HEIGHT = 0
     TRACK_HEIGHT = 44
-    MIN_HEIGHT = RULER_HEIGHT + SECTION_HEIGHT + TRACK_HEIGHT + 8
+    MIN_HEIGHT = RULER_HEIGHT + TRACK_HEIGHT + 8
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._clips: list[EditDecision] = []
-        self._sections: list[MusicSection] = []
+        self._marks: list[float] = []
         self._video_duration = 0.0
         self._selected = -1
+        self._cursor_time: float = -1.0
 
         # Drag state
         self._drag_index = -1
@@ -57,13 +48,26 @@ class TimelineWidget(QWidget):
         self,
         clips: list[EditDecision],
         video_duration: float,
-        sections: list[MusicSection] | None = None,
     ):
         self._clips = list(clips)
         self._video_duration = video_duration
-        self._sections = sections or []
         self._selected = -1
+        self._cursor_time = -1.0
         self.update()
+
+    def set_cursor_position(self, seconds: float):
+        self._cursor_time = seconds
+        self.update()
+
+    def set_marks(self, timestamps: list[float]):
+        self._marks = list(timestamps)
+        self.update()
+
+    def select_clip(self, index: int):
+        if 0 <= index < len(self._clips):
+            self._selected = index
+            self.clip_selected.emit(index)
+            self.update()
 
     @property
     def clips(self) -> list[EditDecision]:
@@ -97,9 +101,10 @@ class TimelineWidget(QWidget):
         painter.setRenderHint(QPainter.Antialiasing)
 
         self._draw_ruler(painter)
-        self._draw_sections(painter)
         self._draw_track(painter)
         self._draw_clips(painter)
+        self._draw_marks(painter)
+        self._draw_cursor(painter)
 
         painter.end()
 
@@ -132,23 +137,6 @@ class TimelineWidget(QWidget):
                 p.setPen(QPen(QColor("#555"), 1))
                 p.drawLine(int(x), y + h - 6, int(x), y + h)
             t += minor
-
-    def _draw_sections(self, p: QPainter):
-        y = self.RULER_HEIGHT
-        h = self.SECTION_HEIGHT
-        p.setFont(QFont("monospace", 7))
-
-        for sec in self._sections:
-            x1 = self._time_to_x(sec.start_time)
-            x2 = self._time_to_x(sec.end_time)
-            color = _SECTION_COLORS.get(sec.label, QColor(50, 50, 55))
-            p.fillRect(QRectF(x1, y, x2 - x1, h), QBrush(color))
-            p.setPen(QPen(QColor("#aaa"), 1))
-            if x2 - x1 > 30:
-                p.drawText(QRectF(x1 + 2, y, x2 - x1 - 4, h), Qt.AlignCenter, sec.label)
-            # Section border
-            p.setPen(QPen(QColor("#666"), 1))
-            p.drawLine(int(x1), y, int(x1), y + h)
 
     def _draw_track(self, p: QPainter):
         y = self.RULER_HEIGHT + self.SECTION_HEIGHT
@@ -192,6 +180,35 @@ class TimelineWidget(QWidget):
                 p.setPen(QPen(QColor("#000"), 1))
                 p.setFont(QFont("monospace", 7, QFont.Bold))
                 p.drawText(QRectF(x1, y, w, h), Qt.AlignCenter, str(i + 1))
+
+    def _draw_marks(self, p: QPainter):
+        if not self._marks or self._video_duration <= 0:
+            return
+        pen = QPen(QColor("#ff5252"), 2, Qt.DashLine)
+        p.setPen(pen)
+        top = 0
+        bottom = self.RULER_HEIGHT + self.SECTION_HEIGHT + self.TRACK_HEIGHT
+        for t in self._marks:
+            x = int(self._time_to_x(t))
+            p.drawLine(x, top, x, bottom)
+
+    def _draw_cursor(self, p: QPainter):
+        if self._cursor_time < 0 or self._video_duration <= 0:
+            return
+        x = self._time_to_x(self._cursor_time)
+        bottom = self.RULER_HEIGHT + self.SECTION_HEIGHT + self.TRACK_HEIGHT
+        # Vertical line
+        p.setPen(QPen(QColor("#42A5F5"), 2))
+        p.drawLine(int(x), 0, int(x), bottom)
+        # Inverted triangle playhead at top of ruler
+        p.setPen(Qt.NoPen)
+        p.setBrush(QBrush(QColor("#42A5F5")))
+        tri = QPolygonF([
+            QPointF(x - 5, 0),
+            QPointF(x + 5, 0),
+            QPointF(x, 8),
+        ])
+        p.drawPolygon(tri)
 
     # --- Mouse interaction ---
 

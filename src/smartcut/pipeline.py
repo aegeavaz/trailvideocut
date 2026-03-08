@@ -141,6 +141,10 @@ class SmartCutPipeline:
         if self.config.davinci:
             from smartcut.editor.exporter import DaVinciExporter
 
+            # Auto-resolve output path for CLI: .mp4 default → .otio
+            if self.config.output_path.suffix.lower() == ".mp4":
+                self.config.output_path = self.config.video_path.parent / "project.otio"
+
             console.print("\n[bold blue]Phase 5/5:[/] Exporting OTIO timeline...")
             exporter = DaVinciExporter(self.config)
             t0 = time.time()

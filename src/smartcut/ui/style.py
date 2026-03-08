@@ -126,6 +126,16 @@ QTabBar::tab:selected {
 QCheckBox { spacing: 6px; font-size: 13px; }
 QCheckBox::indicator { width: 18px; height: 18px; }
 
+QRadioButton { spacing: 6px; font-size: 13px; }
+QRadioButton::indicator { width: 18px; height: 18px; }
+QRadioButton::indicator:unchecked {
+    border: 2px solid #888; border-radius: 10px; background-color: #3c3c3c;
+}
+QRadioButton::indicator:checked {
+    border: 2px solid #2196F3; border-radius: 10px; background-color: #2196F3;
+}
+QRadioButton::indicator:hover { border-color: #42A5F5; }
+
 QSplitter::handle { background-color: #444; width: 2px; }
 QScrollArea { border: none; }
 

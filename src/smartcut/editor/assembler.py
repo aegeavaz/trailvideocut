@@ -33,11 +33,27 @@ _NVENC_PRESET_MAP = {
 }
 
 
+def _require_ffmpeg() -> str:
+    """Return path to ffmpeg binary or raise RuntimeError."""
+    path = detect_gpu().system_ffmpeg or _find_ffmpeg()
+    if path is None:
+        raise RuntimeError(
+            "FFmpeg not found. Install FFmpeg and add it to your system PATH. "
+            "Download: https://ffmpeg.org/download.html"
+        )
+    return path
+
+
 class VideoAssembler:
     """Assemble the final video from a cut plan."""
 
-    def __init__(self, config: SmartCutConfig):
+    def __init__(
+        self,
+        config: SmartCutConfig,
+        progress_callback: "Callable[[int, int], None] | None" = None,
+    ):
         self.config = config
+        self._progress_callback = progress_callback
 
     def _get_threads(self) -> int:
         """Return the number of FFmpeg threads to use.
@@ -51,6 +67,7 @@ class VideoAssembler:
 
     def assemble(self, plan: CutPlan) -> None:
         """Execute the cut plan: extract subclips, concatenate, add audio, export."""
+        self._resolve_fps()
         if (
             plan.transition_style == TransitionStyle.CROSSFADE.value
             and len(plan.decisions) > 1
@@ -78,6 +95,23 @@ class VideoAssembler:
     # FFmpeg native xfade path (fast)
     # ------------------------------------------------------------------
 
+    def _resolve_fps(self) -> None:
+        """Resolve output_fps=0 (auto) by probing the source video."""
+        if self.config.output_fps > 0:
+            return
+        ffmpeg_bin = _require_ffmpeg()
+        result = subprocess.run(
+            [ffmpeg_bin, "-hide_banner", "-i", str(self.config.video_path)],
+            capture_output=True, text=True, timeout=10,
+        )
+        # Parse "30 fps" or "29.97 fps" or "30 tbr" from ffmpeg stderr
+        match = re.search(r"(\d+(?:\.\d+)?)\s+(?:fps|tbr)", result.stderr)
+        if match:
+            self.config.output_fps = float(match.group(1))
+        else:
+            self.config.output_fps = 30.0
+            console.print("  [yellow]Could not detect source FPS, defaulting to 30[/yellow]")
+
     def _probe_duration(self, filepath: str) -> float:
         """Probe media file duration using ffmpeg (no ffprobe dependency).
 
@@ -85,7 +119,7 @@ class VideoAssembler:
         Duration) to stderr and exits immediately with an error because no
         output is specified.  This avoids requiring a separate ffprobe binary.
         """
-        ffmpeg_bin = detect_gpu().system_ffmpeg or _find_ffmpeg() or "ffmpeg"
+        ffmpeg_bin = _require_ffmpeg()
         result = subprocess.run(
             [ffmpeg_bin, "-hide_banner", "-i", filepath],
             capture_output=True, text=True, timeout=10,
@@ -199,7 +233,7 @@ class VideoAssembler:
         frac = Fraction(self.config.output_fps).limit_denominator(100000)
         fps_str = f"{frac.numerator}/{frac.denominator}"
 
-        ffmpeg_bin = detect_gpu().system_ffmpeg or _find_ffmpeg() or "ffmpeg"
+        ffmpeg_bin = _require_ffmpeg()
         cmd = [ffmpeg_bin, "-y"]
 
         # Per-segment inputs with fast seeking
@@ -340,7 +374,7 @@ class VideoAssembler:
         frac = Fraction(self.config.output_fps).limit_denominator(100000)
         fps_str = f"{frac.numerator}/{frac.denominator}"
 
-        ffmpeg_bin = detect_gpu().system_ffmpeg or _find_ffmpeg() or "ffmpeg"
+        ffmpeg_bin = _require_ffmpeg()
         cmd = [ffmpeg_bin, "-y"]
 
         # Per-segment inputs with fast seeking
@@ -407,6 +441,7 @@ class VideoAssembler:
     def _track_ffmpeg_progress(self, proc: subprocess.Popen, total_duration: float) -> None:
         """Parse FFmpeg -progress output and display a Rich progress bar."""
         stderr_chunks: list[bytes] = []
+        total_safe = max(1, int(total_duration))
 
         def drain_stderr() -> None:
             for chunk in proc.stderr:
@@ -430,10 +465,14 @@ class VideoAssembler:
                         us = int(line.split("=", 1)[1])
                         seconds = us / 1_000_000
                         progress.update(task, completed=min(seconds, total_duration))
+                        if self._progress_callback:
+                            self._progress_callback(int(seconds), total_safe)
                     except (ValueError, IndexError):
                         pass
                 elif line == "progress=end":
                     progress.update(task, completed=total_duration)
+                    if self._progress_callback:
+                        self._progress_callback(total_safe, total_safe)
 
         proc.wait()
         stderr_thread.join(timeout=5)

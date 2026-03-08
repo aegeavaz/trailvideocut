@@ -24,7 +24,7 @@ class DaVinciExporter:
         video_duration = vparams.get("duration", 0.0)
         timecode = vparams.get("timecode")
 
-        otio_path = video_path.parent / "project.otio"
+        otio_path = self.config.output_path
         timeline = _generate_otio_timeline(
             plan, video_path, video_duration,
             self.config.audio_path, r_frame_rate, timecode,

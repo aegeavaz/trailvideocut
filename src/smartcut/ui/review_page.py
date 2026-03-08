@@ -1,4 +1,5 @@
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QShortcut
 from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
@@ -16,6 +17,7 @@ from PySide6.QtWidgets import (
 from smartcut.audio.models import AudioAnalysis, MusicSection
 from smartcut.editor.models import CutPlan, EditDecision
 from smartcut.ui.timeline import TimelineWidget
+from smartcut.ui.video_player import VideoPlayer
 
 
 class ReviewPage(QWidget):
@@ -61,18 +63,35 @@ class ReviewPage(QWidget):
         timeline_layout.addWidget(self._timeline)
         root.addWidget(timeline_group)
 
-        # --- Bottom: clip details + render settings ---
-        splitter = QSplitter(Qt.Horizontal)
+        # --- Main content: video player on top, clip info + settings on bottom ---
+        main_splitter = QSplitter(Qt.Vertical)
 
-        # Clip details
+        # Video player
+        self._player = VideoPlayer()
+        main_splitter.addWidget(self._player)
+
+        # Bottom horizontal splitter: clip details + render settings
+        bottom_splitter = QSplitter(Qt.Horizontal)
+
+        # Clip details with prev/next navigation
         clip_group = QGroupBox("Selected Clip")
         clip_layout = QVBoxLayout(clip_group)
         self._clip_info = QLabel("No clip selected")
         self._clip_info.setWordWrap(True)
         self._clip_info.setStyleSheet("font-family: monospace; font-size: 12px;")
         clip_layout.addWidget(self._clip_info)
+
+        clip_nav = QHBoxLayout()
+        self._btn_prev_clip = QPushButton("<< Prev Clip")
+        self._btn_prev_clip.clicked.connect(self._prev_clip)
+        self._btn_next_clip = QPushButton("Next Clip >>")
+        self._btn_next_clip.clicked.connect(self._next_clip)
+        clip_nav.addWidget(self._btn_prev_clip)
+        clip_nav.addWidget(self._btn_next_clip)
+        clip_layout.addLayout(clip_nav)
+
         clip_layout.addStretch()
-        splitter.addWidget(clip_group)
+        bottom_splitter.addWidget(clip_group)
 
         # Render settings
         render_group = QGroupBox("Render Settings")
@@ -107,16 +126,31 @@ class ReviewPage(QWidget):
         self._threads.setSpecialValueText("auto")
         render_layout.addRow("Threads:", self._threads)
 
-        splitter.addWidget(render_group)
-        splitter.setSizes([350, 250])
+        bottom_splitter.addWidget(render_group)
+        bottom_splitter.setSizes([350, 250])
 
-        root.addWidget(splitter, stretch=1)
+        main_splitter.addWidget(bottom_splitter)
+        main_splitter.setSizes([400, 200])
+
+        root.addWidget(main_splitter, stretch=1)
+
+        # Keyboard shortcuts (same as setup page)
+        ctx = Qt.WidgetWithChildrenShortcut
+        QShortcut(Qt.Key_Space, self, self._player.toggle_play, context=ctx)
+        QShortcut(Qt.Key_Left, self, self._player._step_back, context=ctx)
+        QShortcut(Qt.Key_Right, self, self._player._step_forward, context=ctx)
+        QShortcut(Qt.Key_Up, self, self._player._jump_forward, context=ctx)
+        QShortcut(Qt.Key_Down, self, self._player._jump_back, context=ctx)
+        QShortcut(Qt.Key_Home, self, self._player._go_start, context=ctx)
+        QShortcut(Qt.Key_End, self, self._player._go_end, context=ctx)
 
     def set_data(
         self,
         audio: AudioAnalysis,
         cut_plan: CutPlan,
         video_duration: float,
+        video_path: str = "",
+        marks: list[float] | None = None,
     ):
         self._audio = audio
         self._sections = audio.sections
@@ -131,7 +165,17 @@ class ReviewPage(QWidget):
         )
 
         # Timeline
-        self._timeline.set_data(cut_plan.decisions, video_duration, audio.sections)
+        self._timeline.set_data(cut_plan.decisions, video_duration)
+
+        # Marks on timeline and player
+        if marks:
+            self._timeline.set_marks(marks)
+            self._player.set_marks(marks)
+
+        # Load video and connect playback cursor
+        if video_path:
+            self._player.load_video(video_path)
+        self._player.position_changed.connect(self._timeline.set_cursor_position)
 
         # Clip info
         self._clip_info.setText("Click a clip on the timeline to see details")
@@ -144,6 +188,9 @@ class ReviewPage(QWidget):
         clip = self._timeline.clips[index]
         duration = clip.source_end - clip.source_start
         target_dur = clip.target_end - clip.target_start
+
+        # Seek video to clip start
+        self._player.seek_to(clip.source_start)
 
         # Find section
         section_label = "unknown"
@@ -178,6 +225,26 @@ class ReviewPage(QWidget):
             "output_threads": self._threads.value(),
         }
         self.export_requested.emit(settings)
+
+    def _prev_clip(self):
+        clips = self._timeline.clips
+        if not clips:
+            return
+        current = self._timeline.selected_index
+        new_index = max(0, current - 1) if current >= 0 else 0
+        self._timeline.select_clip(new_index)
+
+    def _next_clip(self):
+        clips = self._timeline.clips
+        if not clips:
+            return
+        current = self._timeline.selected_index
+        new_index = min(len(clips) - 1, current + 1) if current >= 0 else 0
+        self._timeline.select_clip(new_index)
+
+    def hideEvent(self, event):
+        self._player.pause()
+        super().hideEvent(event)
 
     def get_current_clips(self) -> list[EditDecision]:
         return list(self._timeline.clips)

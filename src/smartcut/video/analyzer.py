@@ -11,6 +11,8 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeEl
 
 from smartcut.config import SmartCutConfig
 from smartcut.gpu import detect_gpu
+from collections.abc import Callable
+
 from smartcut.video.models import InterestScore, VideoSegment
 from smartcut.video.scorers import (
     score_brightness_change,
@@ -46,9 +48,16 @@ def _score_single_frame(
 class VideoAnalyzer:
     """Analyze video for visual interest scoring using overlapping windows."""
 
-    def __init__(self, config: SmartCutConfig):
+    def __init__(
+        self,
+        config: SmartCutConfig,
+        progress_callback: "Callable[[int, int], None] | None" = None,
+        status_callback: "Callable[[str], None] | None" = None,
+    ):
         self.config = config
         self.source_fps: float = 30.0
+        self._progress_callback = progress_callback
+        self._status_callback = status_callback
 
     def analyze(self) -> list[VideoSegment]:
         """Analyze entire video, return scored segments with overlapping windows.
@@ -235,7 +244,11 @@ class VideoAnalyzer:
                 colors.append(frame)
                 frame_count += 1
                 progress.update(task, completed=frame_count)
+                if self._progress_callback and frame_count % 10 == 0:
+                    self._progress_callback(frame_count, estimated_frames)
             progress.update(task, completed=max(estimated_frames, frame_count))
+            if self._progress_callback:
+                self._progress_callback(max(estimated_frames, frame_count), estimated_frames)
 
         proc.stdout.close()
         stderr_out = proc.stderr.read() if proc.stderr else ""
@@ -290,7 +303,11 @@ class VideoAnalyzer:
                     colors.append(frame_small)
                 frame_idx += 1
                 progress.update(task, completed=frame_idx)
+                if self._progress_callback and frame_idx % 10 == 0:
+                    self._progress_callback(frame_idx, total_frames)
             progress.update(task, completed=total_frames)
+            if self._progress_callback:
+                self._progress_callback(total_frames, total_frames)
 
         cap.release()
         return (times, grays, colors)
@@ -312,6 +329,8 @@ class VideoAnalyzer:
         # Phase 2: GPU batch scoring + CPU optical flow in parallel
         gpu_scorer = GPUFrameScorer(batch_size=self.config.gpu_batch_size)
         num_workers = max(4, (os.cpu_count() or 4) - 2)
+        if self._status_callback:
+            self._status_callback("Scoring frames (GPU + CPU optical flow)")
 
         with Progress(
             SpinnerColumn(),
@@ -349,15 +368,21 @@ class VideoAnalyzer:
 
                 # Collect optical flow results as they complete
                 flow_scores = {0: 0.0}
+                flow_done = 0
                 for f in as_completed(future_to_idx):
                     i = future_to_idx[f]
                     flow_scores[i] = f.result()
+                    flow_done += 1
                     progress.advance(score_task, advance=flow_weight / max(n - 1, 1))
+                    if self._progress_callback and flow_done % 10 == 0:
+                        self._progress_callback(flow_done, n)
 
                 # Collect GPU results (may already be done)
                 gpu_results = gpu_future.result()
 
             progress.update(score_task, completed=n)
+            if self._progress_callback:
+                self._progress_callback(n, n)
 
         # Merge GPU + CPU results
         frame_data: list[tuple[float, dict[str, float]]] = []
@@ -386,6 +411,8 @@ class VideoAnalyzer:
 
         # Phase 2: Score pre-read frames with ThreadPoolExecutor
         num_workers = max(4, (os.cpu_count() or 4) - 2)
+        if self._status_callback:
+            self._status_callback(f"Scoring frames (CPU, {num_workers} threads)")
 
         with Progress(
             SpinnerColumn(),
@@ -410,11 +437,16 @@ class VideoAnalyzer:
                     )
                     pending.append((i, future))
 
-                frame_data: list[tuple[float, dict[str, float]] | None] = [None] * len(grays)
+                total_frames = len(grays)
+                frame_data: list[tuple[float, dict[str, float]] | None] = [None] * total_frames
                 for i, future in pending:
                     index, current_time, scores = future.result()
                     frame_data[index] = (current_time, scores)
                     progress.advance(score_task)
+                    if self._progress_callback and (i + 1) % 10 == 0:
+                        self._progress_callback(i + 1, total_frames)
+                if self._progress_callback:
+                    self._progress_callback(total_frames, total_frames)
 
         logger.info("Hybrid scoring complete: %d frames scored", len(frame_data))
         return frame_data
@@ -431,6 +463,8 @@ class VideoAnalyzer:
         sample_interval = max(1, int(fps / self.config.analysis_fps))
 
         num_workers = max(4, (os.cpu_count() or 4) - 2)
+        if self._status_callback:
+            self._status_callback(f"Analyzing video ({num_workers} scoring threads)")
         raw_frames: list[tuple[float, np.ndarray, np.ndarray]] = []
         pending: list[tuple[int, object]] = []
         frame_idx = 0
@@ -472,8 +506,12 @@ class VideoAnalyzer:
 
                     frame_idx += 1
                     progress.update(task, completed=frame_idx)
+                    if self._progress_callback and frame_idx % 10 == 0:
+                        self._progress_callback(frame_idx, total_frames)
 
                 progress.update(task, completed=total_frames)
+                if self._progress_callback:
+                    self._progress_callback(total_frames, total_frames)
 
                 # Collect scoring results (most are already done by now)
                 frame_data: list[tuple[float, dict[str, float]] | None] = [None] * len(raw_frames)
