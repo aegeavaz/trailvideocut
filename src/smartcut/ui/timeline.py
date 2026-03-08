@@ -35,6 +35,7 @@ class TimelineWidget(QWidget):
         self._video_duration = 0.0
         self._selected = -1
         self._cursor_time: float = -1.0
+        self._cursor_color: str = "#42A5F5"
 
         # Drag state
         self._drag_index = -1
@@ -57,6 +58,10 @@ class TimelineWidget(QWidget):
 
     def set_cursor_position(self, seconds: float):
         self._cursor_time = seconds
+        self.update()
+
+    def set_cursor_color(self, color_str: str):
+        self._cursor_color = color_str
         self.update()
 
     def set_marks(self, timestamps: list[float]):
@@ -200,12 +205,13 @@ class TimelineWidget(QWidget):
             return
         x = self._time_to_x(self._cursor_time)
         bottom = self.RULER_HEIGHT + self.SECTION_HEIGHT + self.TRACK_HEIGHT
+        color = QColor(self._cursor_color)
         # Vertical line
-        p.setPen(QPen(QColor("#42A5F5"), 2))
+        p.setPen(QPen(color, 2))
         p.drawLine(int(x), 0, int(x), bottom)
         # Inverted triangle playhead at top of ruler
         p.setPen(Qt.NoPen)
-        p.setBrush(QBrush(QColor("#42A5F5")))
+        p.setBrush(QBrush(color))
         tri = QPolygonF([
             QPointF(x - 5, 0),
             QPointF(x + 5, 0),

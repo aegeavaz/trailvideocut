@@ -131,6 +131,13 @@ class VideoPlayer(QWidget):
         self._btn_play.setText("Play")
         self._player.pause()
 
+    def set_muted(self, muted: bool):
+        if muted:
+            self._saved_volume = self._audio_output.volume()
+            self._audio_output.setVolume(0.0)
+        else:
+            self._audio_output.setVolume(getattr(self, "_saved_volume", 1.0))
+
     def stop(self):
         self._want_play = False
         self._btn_play.setText("Play")

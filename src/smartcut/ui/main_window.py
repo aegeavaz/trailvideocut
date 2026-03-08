@@ -96,6 +96,7 @@ class MainWindow(QMainWindow):
             self._video_duration,
             video_path=str(self._config.video_path),
             marks=list(self._config.include_timestamps),
+            audio_path=str(self._config.audio_path),
         )
         self._go_page(1)
 
@@ -139,6 +140,7 @@ class MainWindow(QMainWindow):
             self._video_duration,
             video_path=str(self._config.video_path),
             marks=list(self._config.include_timestamps),
+            audio_path=str(self._config.audio_path),
         )
 
         if self._config:
