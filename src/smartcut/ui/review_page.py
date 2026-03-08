@@ -13,6 +13,8 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSpinBox,
     QSplitter,
+    QSpacerItem,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -92,11 +94,12 @@ class ReviewPage(QWidget):
         root.addWidget(timeline_group)
 
         # --- Main content: video player on top, clip info + settings on bottom ---
-        main_splitter = QSplitter(Qt.Vertical)
-
-        # Video player
+        # Video player (stretches to fill available space)
         self._player = VideoPlayer()
-        main_splitter.addWidget(self._player)
+        root.addWidget(self._player, stretch=1)
+
+        # Spacing between player controls and bottom section
+        root.addSpacerItem(QSpacerItem(0, 12, QSizePolicy.Minimum, QSizePolicy.Fixed))
 
         # Bottom horizontal splitter: clip details + render settings
         bottom_splitter = QSplitter(Qt.Horizontal)
@@ -157,10 +160,9 @@ class ReviewPage(QWidget):
         bottom_splitter.addWidget(render_group)
         bottom_splitter.setSizes([350, 250])
 
-        main_splitter.addWidget(bottom_splitter)
-        main_splitter.setSizes([400, 200])
-
-        root.addWidget(main_splitter, stretch=1)
+        # Fixed-height bottom section (not resizable vertically)
+        bottom_splitter.setFixedHeight(200)
+        root.addWidget(bottom_splitter, stretch=0)
 
         # Connect playback cursor, user seek deselection, and clip boundary check
         self._player.position_changed.connect(self._timeline.set_cursor_position)
@@ -409,7 +411,7 @@ class ReviewPage(QWidget):
         # Find section
         section_label = "unknown"
         section_energy = 0.0
-        mid = (clip.source_start + clip.source_end) / 2
+        mid = (clip.target_start + clip.target_end) / 2
         for sec in self._sections:
             if sec.start_time <= mid < sec.end_time:
                 section_label = sec.label
