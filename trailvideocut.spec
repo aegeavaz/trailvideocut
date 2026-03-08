@@ -3,6 +3,7 @@
 
 import os
 import imageio_ffmpeg
+from PyInstaller.utils.hooks import copy_metadata
 
 block_cipher = None
 
@@ -14,7 +15,7 @@ a = Analysis(
     ["launcher.py"],
     pathex=[],
     binaries=ffmpeg_data,
-    datas=[],
+    datas=copy_metadata("imageio") + copy_metadata("imageio_ffmpeg"),
     hiddenimports=[
         "librosa",
         "soundfile",
