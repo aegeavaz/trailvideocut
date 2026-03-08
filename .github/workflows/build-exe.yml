@@ -21,6 +21,20 @@ jobs:
       - name: Install dependencies
         run: pip install ".[ui]" pyinstaller
 
+      - name: Download full FFmpeg (GPL, NVENC-enabled)
+        shell: pwsh
+        run: |
+          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
+          Invoke-WebRequest -Uri $url -OutFile ffmpeg-full.zip
+          Expand-Archive -Path ffmpeg-full.zip -DestinationPath ffmpeg-full
+          $binDir = Get-ChildItem -Path ffmpeg-full -Recurse -Directory -Filter "bin" | Select-Object -First 1
+          Copy-Item "$($binDir.FullName)\ffmpeg.exe" -Destination "ffmpeg.exe"
+          Copy-Item "$($binDir.FullName)\ffprobe.exe" -Destination "ffprobe.exe"
+          Write-Host "FFmpeg version:"
+          .\ffmpeg.exe -version | Select-Object -First 3
+          Write-Host "NVENC support:"
+          .\ffmpeg.exe -hide_banner -encoders 2>$null | Select-String "h264_nvenc"
+
       - name: Build executable
         run: pyinstaller trailvideocut.spec
 

@@ -2,14 +2,22 @@
 """PyInstaller spec for TrailVideoCut Windows executable."""
 
 import os
-import imageio_ffmpeg
 from PyInstaller.utils.hooks import copy_metadata
 
 block_cipher = None
 
-# Bundle imageio-ffmpeg's FFmpeg binary
-ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-ffmpeg_data = [(ffmpeg_exe, ".")]
+# Prefer full FFmpeg binaries placed by CI (next to the .spec file).
+# Fall back to imageio-ffmpeg for local dev builds.
+_full_ffmpeg = os.path.join(SPECPATH, "ffmpeg.exe")
+_full_ffprobe = os.path.join(SPECPATH, "ffprobe.exe")
+
+if os.path.isfile(_full_ffmpeg):
+    ffmpeg_data = [(_full_ffmpeg, ".")]
+    if os.path.isfile(_full_ffprobe):
+        ffmpeg_data.append((_full_ffprobe, "."))
+else:
+    import imageio_ffmpeg
+    ffmpeg_data = [(imageio_ffmpeg.get_ffmpeg_exe(), ".")]
 
 a = Analysis(
     ["launcher.py"],
