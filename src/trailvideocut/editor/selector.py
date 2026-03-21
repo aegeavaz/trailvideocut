@@ -60,6 +60,9 @@ class SegmentSelector:
             merged_intervals = self._merge_low_energy_intervals(
                 intervals, audio.sections, target_clips
             )
+            # Merging may stop early due to max_segment_duration cap;
+            # use actual merged count so selected length matches.
+            target_clips = len(merged_intervals)
 
         # Pre-sort segments by midpoint for binary search
         sorted_segments = sorted(segments, key=lambda s: s.midpoint)

@@ -186,6 +186,70 @@ class TestSelectCutPoints:
             gap = result[i].timestamp - result[i - 1].timestamp
             assert gap >= 0.25 - 0.01
 
+    def test_max_segment_with_non_aligned_beats(self):
+        """Beats at 0.42s intervals with max_segment=3.0 — all gaps must be ≤ 3.0."""
+        beats = _make_beats(50, interval=0.42)  # 21s of beats
+        # Very low density to trigger forced cuts
+        result = select_cut_points_for_section(beats, 0.1, min_segment=1.0, max_segment=3.0)
+        for i in range(1, len(result)):
+            gap = result[i].timestamp - result[i - 1].timestamp
+            assert gap <= 3.0 + 0.01, (
+                f"Gap {gap:.3f}s between cuts at {result[i-1].timestamp:.3f} "
+                f"and {result[i].timestamp:.3f} exceeds max_segment 3.0"
+            )
+
+    def test_candidate_window_preserves_valid_candidates(self):
+        """Valid candidates in window should not be overwritten by an oversized one."""
+        # Set up beats so the window collects valid candidates before hitting one at >= max_segment
+        beats = [
+            BeatInfo(timestamp=0.0, strength=0.8, is_downbeat=True),
+            BeatInfo(timestamp=1.5, strength=0.7, is_downbeat=False),
+            BeatInfo(timestamp=2.5, strength=0.6, is_downbeat=False),  # valid candidate
+            BeatInfo(timestamp=3.0, strength=0.5, is_downbeat=False),  # at max_segment boundary
+            BeatInfo(timestamp=4.0, strength=0.5, is_downbeat=False),
+        ]
+        result = select_cut_points_for_section(beats, 0.5, min_segment=1.0, max_segment=3.0)
+        for i in range(1, len(result)):
+            gap = result[i].timestamp - result[i - 1].timestamp
+            assert gap <= 3.0 + 0.01, (
+                f"Gap {gap:.3f}s exceeds max_segment 3.0"
+            )
+
+    def test_max_segment_across_section_boundary(self):
+        """Cross-section gaps must not exceed max_segment."""
+        beats = _make_beats(30, interval=0.5)  # 15s of beats
+        # Two sections with a gap in beat selection that could cross max_segment
+        sections = [
+            MusicSection("intro", 0.0, 5.0, 0.1),   # very low energy -> few cuts
+            MusicSection("verse", 5.0, 15.0, 0.1),   # very low energy -> few cuts
+        ]
+        result = select_cut_points(beats, sections, 120.0, min_segment=1.0, max_segment=4.0)
+        for i in range(1, len(result)):
+            gap = result[i].timestamp - result[i - 1].timestamp
+            assert gap <= 4.0 + 0.01, (
+                f"Gap {gap:.3f}s between cuts at {result[i-1].timestamp:.3f} "
+                f"and {result[i].timestamp:.3f} exceeds max_segment 4.0"
+            )
+
+    def test_max_segment_enforced_end_to_end(self):
+        """Comprehensive regression: realistic beats, verify no gap > max_segment anywhere."""
+        # Simulate ~143 BPM, 60s of music
+        beats = _make_beats(144, interval=0.42)
+        sections = [
+            MusicSection("intro", 0.0, 15.0, 0.2),
+            MusicSection("verse", 15.0, 30.0, 0.4),
+            MusicSection("chorus", 30.0, 45.0, 0.8),
+            MusicSection("outro", 45.0, 60.5, 0.2),
+        ]
+        max_seg = 6.0
+        result = select_cut_points(beats, sections, 143.0, min_segment=1.0, max_segment=max_seg)
+        for i in range(1, len(result)):
+            gap = result[i].timestamp - result[i - 1].timestamp
+            assert gap <= max_seg + 0.01, (
+                f"Gap {gap:.3f}s between cuts at {result[i-1].timestamp:.3f} "
+                f"and {result[i].timestamp:.3f} exceeds max_segment {max_seg}"
+            )
+
     def test_ensures_final_beat(self):
         beats = _make_beats(10, interval=1.0)  # 0-9s
         sections = [MusicSection("verse", 0.0, 5.0, 0.5)]  # only covers first half

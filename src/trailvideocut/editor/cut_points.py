@@ -4,6 +4,8 @@ Selects which beats become cut points based on musical energy sections.
 High-energy sections produce more cuts; low-energy sections produce fewer.
 """
 
+import math
+
 from trailvideocut.audio.models import BeatInfo, MusicSection
 
 
@@ -54,11 +56,19 @@ def select_cut_points_for_section(
             i += 1
             continue
 
-        # Force a cut if gap grows too large
+        # Force a cut if gap grows too large — search backward for last valid beat
         if time_since_last >= max_segment:
-            cut_points.append(beat)
-            ideal_next = beat.timestamp + effective_interval
-            i += 1
+            chosen, chosen_idx = beat, i
+            for k in range(i - 1, 0, -1):
+                k_gap = beats[k].timestamp - cut_points[-1].timestamp
+                if k_gap < min_segment:
+                    break
+                if k_gap < max_segment:
+                    chosen, chosen_idx = beats[k], k
+                    break
+            cut_points.append(chosen)
+            ideal_next = chosen.timestamp + effective_interval
+            i = chosen_idx + 1
             continue
 
         # Only start evaluating once we're near the ideal time
@@ -78,8 +88,9 @@ def select_cut_points_for_section(
             if cand_gap < min_segment:
                 continue
             if cand_gap >= max_segment:
-                # Must cut here immediately
-                candidates = [(cand, j)]
+                # Must cut here — but keep already-collected valid candidates
+                if not candidates:
+                    candidates = [(cand, j)]
                 break
             candidates.append((cand, j))
 
@@ -151,4 +162,58 @@ def select_cut_points(
         if not cut_points or (beats[-1].timestamp - cut_points[-1].timestamp) >= min_segment:
             cut_points.append(beats[-1])
 
+    # Safety net: split any remaining gaps > max_segment with synthetic beats
+    cut_points = _enforce_max_segment(cut_points, beats, max_segment)
+
     return cut_points
+
+
+def _enforce_max_segment(
+    cut_points: list[BeatInfo],
+    beats: list[BeatInfo],
+    max_segment: float,
+) -> list[BeatInfo]:
+    """Insert synthetic beats to break any gap exceeding max_segment.
+
+    First tries to use existing beats from the full beat list. Falls back to
+    evenly-spaced synthetic beats if no real beat is available.
+    """
+    if len(cut_points) < 2:
+        return cut_points
+
+    # Index beats by timestamp for fast lookup
+    beat_set = {round(b.timestamp, 6) for b in cut_points}
+    result: list[BeatInfo] = [cut_points[0]]
+
+    for cp in cut_points[1:]:
+        while cp.timestamp - result[-1].timestamp > max_segment + 1e-9:
+            gap = cp.timestamp - result[-1].timestamp
+            # Try to find a real beat near the max_segment boundary
+            target = result[-1].timestamp + max_segment
+            best = None
+            for b in beats:
+                if b.timestamp <= result[-1].timestamp:
+                    continue
+                if b.timestamp >= cp.timestamp:
+                    break
+                if round(b.timestamp, 6) in beat_set:
+                    continue
+                if b.timestamp <= target:
+                    best = b
+            if best is not None:
+                result.append(best)
+                beat_set.add(round(best.timestamp, 6))
+            else:
+                # Insert evenly-spaced synthetic beats
+                n_splits = math.ceil(gap / max_segment)
+                step = gap / n_splits
+                ts = result[-1].timestamp + step
+                result.append(BeatInfo(
+                    timestamp=ts,
+                    strength=0.0,
+                    is_downbeat=False,
+                ))
+                beat_set.add(round(ts, 6))
+        result.append(cp)
+
+    return result

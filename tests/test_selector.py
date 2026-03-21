@@ -117,6 +117,31 @@ class TestSegmentSelector:
                 f"decision {i-1} source_start={plan.decisions[i-1].source_start}"
             )
 
+    def test_decisions_target_duration_respects_max_segment(self):
+        """All decisions must have target_end - target_start ≤ max_segment_duration."""
+        max_dur = 4.0
+        config = _make_config(max_segment_duration=max_dur)
+        selector = SegmentSelector(config)
+        # Beats at 0.42s interval (~143 BPM), low-energy to produce long gaps
+        beats = [
+            BeatInfo(timestamp=i * 0.42, strength=0.8 if i % 4 == 0 else 0.5, is_downbeat=i % 4 == 0)
+            for i in range(60)
+        ]
+        sections = [
+            MusicSection("intro", 0.0, 12.0, 0.1),
+            MusicSection("verse", 12.0, 25.2, 0.1),
+        ]
+        audio = AudioAnalysis(
+            duration=25.0, tempo=143.0, beats=beats, sections=sections,
+        )
+        segments = _make_segments(120, hop=0.5, window=2.0)
+        plan = selector.select(audio, segments)
+        for d in plan.decisions:
+            dur = d.target_end - d.target_start
+            assert dur <= max_dur + 0.01, (
+                f"Decision target duration {dur:.3f}s exceeds max_segment_duration {max_dur}"
+            )
+
     def test_include_timestamps(self):
         """Verify --include forces selection of the segment containing that timestamp."""
         config = _make_config(include_timestamps=[5.0])
