@@ -5,6 +5,10 @@ from fractions import Fraction
 from rich.console import Console
 
 from trailvideocut.audio.analyzer import AudioAnalyzer
+from trailvideocut.audio.energy_curve import (
+    compute_smoothed_energy,
+    detect_energy_transitions,
+)
 from trailvideocut.audio.models import AudioAnalysis
 from trailvideocut.audio.structure import MusicalStructureAnalyzer
 from trailvideocut.config import TrailVideoCutConfig
@@ -87,6 +91,24 @@ class TrailVideoCutPipeline:
                 f"(score: {seg.interest.composite:.3f})"
             )
 
+        # Detect energy transitions for intra-section cut forcing
+        energy_curve, energy_times = compute_smoothed_energy(
+            audio_analysis.onset_envelope,
+            audio_analysis.sample_rate,
+            smooth_window_sec=self.config.energy_smooth_window,
+        )
+        energy_transitions = detect_energy_transitions(
+            energy_curve,
+            energy_times,
+            min_magnitude=self.config.energy_transition_threshold,
+        )
+        if energy_transitions:
+            console.print(f"\n  Detected {len(energy_transitions)} energy transition(s):")
+            for t in energy_transitions:
+                console.print(
+                    f"    {t.timestamp:6.1f}s ({t.direction}, magnitude: {t.magnitude:.2f})"
+                )
+
         # Phase 3: Energy-driven cut point selection
         console.print("\n[bold blue]Phase 3/5:[/] Selecting cut points by energy...")
         cut_points = select_cut_points(
@@ -95,6 +117,7 @@ class TrailVideoCutPipeline:
             audio_analysis.tempo,
             self.config.min_segment_duration,
             self.config.max_segment_duration,
+            energy_transitions=energy_transitions,
         )
         console.print(
             f"  {len(audio_analysis.beats)} beats -> {len(cut_points)} cut points"
@@ -118,7 +141,11 @@ class TrailVideoCutPipeline:
         # Phase 4: Segment selection
         console.print("\n[bold blue]Phase 4/5:[/] Selecting best segments...")
         selector = SegmentSelector(self.config)
-        cut_plan = selector.select(audio_analysis, segments, cut_points=cut_points)
+        cut_plan = selector.select(
+            audio_analysis, segments,
+            cut_points=cut_points,
+            energy_transitions=energy_transitions,
+        )
         n_intervals = len(cut_points) - 1
         console.print(
             f"  {n_intervals} beat intervals, "
@@ -136,6 +163,20 @@ class TrailVideoCutPipeline:
                 f"  Clip {i+1:3d}: {d.source_start:6.1f}s - {d.source_end:6.1f}s "
                 f"(dur: {duration:.1f}s, score: {d.interest_score:.3f})"
             )
+
+        # Per-section clip duration summary
+        for s in audio_analysis.sections:
+            section_clips = [
+                d for d in cut_plan.decisions
+                if d.target_start >= s.start_time and d.target_start < s.end_time
+            ]
+            if section_clips:
+                durs = [d.target_end - d.target_start for d in section_clips]
+                avg_dur = sum(durs) / len(durs)
+                console.print(
+                    f"  [{s.label:8s}] {len(section_clips)} clips, "
+                    f"avg duration: {avg_dur:.1f}s (energy: {s.energy:.2f})"
+                )
 
         # Phase 5: Assembly or clip export
         if self.config.davinci:

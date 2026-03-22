@@ -3,6 +3,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from trailvideocut.audio.energy_curve import EnergyTransition
 from trailvideocut.audio.models import AudioAnalysis, BeatInfo, MusicSection
 from trailvideocut.config import TrailVideoCutConfig, TransitionStyle
 from trailvideocut.editor.models import EditDecision
@@ -163,7 +164,7 @@ class TestSegmentSelector:
         selector = SegmentSelector(config)
         plan = selector.select(sample_audio_analysis, sample_segments)
         assert plan.song_tempo == 120.0
-        assert plan.transition_style == TransitionStyle.HARD_CUT.value
+        assert plan.transition_style == TransitionStyle.CROSSFADE.value
         assert plan.total_duration > 0
         assert plan.score_cv >= 0.0
 
@@ -300,6 +301,31 @@ class TestGlobalSelection:
             d.source_start <= include_ts <= d.source_end for d in plan.decisions
         )
         assert has_included, f"Include timestamp {include_ts}s not found in output"
+
+    def test_no_overlapping_source_in_consecutive_selections(self):
+        """Selected segments should not have overlapping source regions
+        when enough video is available (no fallback needed)."""
+        config = _make_config(segment_window=2.0)
+        selector = SegmentSelector(config)
+
+        # 200 segments over 100s — plenty of room for 8 picks with 2.0s spacing
+        segments = _make_segments(200, hop=0.5, window=2.0)
+        sorted_segments = sorted(segments, key=lambda s: s.midpoint)
+        midpoints = [s.midpoint for s in sorted_segments]
+        sections = [MusicSection(label="all", start_time=0.0, end_time=100.0, energy=0.5)]
+
+        selected = selector._select_top_segments(
+            sorted_segments, midpoints, sections, n=8,
+            video_duration=100.0, include_segments=[],
+        )
+
+        # Consecutive selections should have midpoints >= segment_window apart
+        for i in range(1, len(selected)):
+            gap = selected[i].midpoint - selected[i - 1].midpoint
+            assert gap >= config.segment_window - 0.01, (
+                f"Consecutive selections {i-1} and {i} have midpoint gap {gap:.2f}s "
+                f"< segment_window {config.segment_window}s"
+            )
 
 
 class TestQualityAdaptive:
@@ -614,6 +640,130 @@ class TestMergeContinuous:
             assert merged[i].source_start >= merged[i - 1].source_end - 1e-9, (
                 f"Clip {i} source [{merged[i].source_start:.1f}, {merged[i].source_end:.1f}] "
                 f"overlaps with clip {i-1} [{merged[i-1].source_start:.1f}, {merged[i-1].source_end:.1f}]"
+            )
+
+    def test_merge_blocked_by_energy_transition(self):
+        """Adjacent decisions should not merge if an energy transition falls between them."""
+        config = _make_config()
+        selector = SegmentSelector(config)
+        decisions = [
+            self._make_decision(0, 1.0, 1.6, 0.0, 0.6),
+            self._make_decision(1, 1.5, 2.1, 0.6, 1.2),
+            self._make_decision(2, 2.0, 2.6, 1.2, 1.8),
+        ]
+        # Transition at t=0.8 blocks merge of decisions that span it
+        transitions = [EnergyTransition(timestamp=0.8, magnitude=0.5, direction="up")]
+        merged = selector._merge_continuous(decisions, energy_transitions=transitions)
+        # Should NOT merge into 1 clip
+        assert len(merged) >= 2
+
+    def test_merge_allowed_without_transition(self):
+        """Without transitions, adjacent decisions should merge as before."""
+        config = _make_config()
+        selector = SegmentSelector(config)
+        decisions = [
+            self._make_decision(0, 1.0, 1.6, 0.0, 0.6),
+            self._make_decision(1, 1.5, 2.1, 0.6, 1.2),
+            self._make_decision(2, 2.0, 2.6, 1.2, 1.8),
+        ]
+        merged_none = selector._merge_continuous(decisions, energy_transitions=None)
+        merged_empty = selector._merge_continuous(decisions, energy_transitions=[])
+        assert len(merged_none) == 1
+        assert len(merged_empty) == 1
+
+    def test_merge_transition_at_boundary_blocks(self):
+        """A transition right at the boundary between decisions should block merge."""
+        config = _make_config()
+        selector = SegmentSelector(config)
+        decisions = [
+            self._make_decision(0, 1.0, 2.0, 0.0, 1.0),
+            self._make_decision(1, 1.9, 2.9, 1.0, 2.0),
+            self._make_decision(2, 2.8, 3.8, 2.0, 3.0),
+        ]
+        # Transition at t=1.5 — within the would-be merged range
+        transitions = [EnergyTransition(timestamp=1.5, magnitude=0.6, direction="down")]
+        merged = selector._merge_continuous(decisions, energy_transitions=transitions)
+        assert len(merged) >= 2
+
+    def test_merge_blocked_at_section_boundary(self):
+        """Adjacent decisions should not merge across a section boundary with large energy diff."""
+        config = _make_config()
+        selector = SegmentSelector(config)
+        decisions = [
+            self._make_decision(0, 1.0, 2.0, 0.0, 1.0),
+            self._make_decision(1, 1.9, 2.9, 1.0, 2.0),
+            self._make_decision(2, 2.8, 3.8, 2.0, 3.0),
+        ]
+        # Section boundary at t=1.5 with large energy change (0.2 → 0.9)
+        sections = [
+            MusicSection(label="slow", start_time=0.0, end_time=1.5, energy=0.2),
+            MusicSection(label="fast", start_time=1.5, end_time=3.0, energy=0.9),
+        ]
+        merged = selector._merge_continuous(decisions, sections=sections)
+        # Should NOT merge into 1 clip — boundary at 1.5 between decisions 0 and 1
+        assert len(merged) >= 2
+
+    def test_merge_allowed_across_similar_energy_sections(self):
+        """Adjacent decisions should merge across a section boundary with small energy diff."""
+        config = _make_config()
+        selector = SegmentSelector(config)
+        decisions = [
+            self._make_decision(0, 1.0, 2.0, 0.0, 1.0),
+            self._make_decision(1, 1.9, 2.9, 1.0, 2.0),
+            self._make_decision(2, 2.8, 3.8, 2.0, 3.0),
+        ]
+        # Section boundary at t=1.5 with small energy change (0.5 → 0.6)
+        sections = [
+            MusicSection(label="verse1", start_time=0.0, end_time=1.5, energy=0.5),
+            MusicSection(label="verse2", start_time=1.5, end_time=3.0, energy=0.6),
+        ]
+        merged = selector._merge_continuous(decisions, sections=sections)
+        # Small energy diff — should merge as before
+        assert len(merged) == 1
+
+    def test_section_break_uses_different_source(self):
+        """When merge is blocked by section boundary, clips should use different source footage."""
+        config = _make_config()
+        selector = SegmentSelector(config)
+        # Adjacent source decisions (gap < threshold)
+        decisions = [
+            self._make_decision(0, 10.0, 11.0, 0.0, 1.0),
+            self._make_decision(1, 10.9, 11.9, 1.0, 2.0),  # source gap = -0.1 (overlapping)
+            self._make_decision(2, 20.0, 21.0, 2.0, 3.0),  # far away source
+        ]
+        sections = [
+            MusicSection(label="slow", start_time=0.0, end_time=1.5, energy=0.2),
+            MusicSection(label="fast", start_time=1.5, end_time=3.0, energy=0.9),
+        ]
+        merged = selector._merge_continuous(decisions, sections=sections)
+        # Should have at least 2 clips
+        assert len(merged) >= 2
+        # The second clip should NOT start from where the first ended
+        # (it should use curr.source_start, not flushed_source_end)
+        if len(merged) >= 2:
+            source_gap = merged[1].source_start - merged[0].source_end
+            assert source_gap >= 0.5, (
+                f"Clips have near-zero source gap {source_gap:.3f}s — "
+                f"expected different source footage after section break"
+            )
+
+    def test_transition_break_uses_different_source(self):
+        """When merge is blocked by energy transition, clips should use different source footage."""
+        config = _make_config()
+        selector = SegmentSelector(config)
+        decisions = [
+            self._make_decision(0, 10.0, 11.0, 0.0, 1.0),
+            self._make_decision(1, 10.9, 11.9, 1.0, 2.0),
+            self._make_decision(2, 20.0, 21.0, 2.0, 3.0),
+        ]
+        transitions = [EnergyTransition(timestamp=1.5, magnitude=0.5, direction="up")]
+        merged = selector._merge_continuous(decisions, energy_transitions=transitions)
+        assert len(merged) >= 2
+        if len(merged) >= 2:
+            source_gap = merged[1].source_start - merged[0].source_end
+            assert source_gap >= 0.5, (
+                f"Clips have near-zero source gap {source_gap:.3f}s — "
+                f"expected different source footage after transition break"
             )
 
 

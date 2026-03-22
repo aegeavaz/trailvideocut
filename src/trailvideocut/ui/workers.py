@@ -3,6 +3,10 @@ from concurrent.futures import ThreadPoolExecutor
 from PySide6.QtCore import QThread, Signal
 
 from trailvideocut.audio.analyzer import AudioAnalyzer
+from trailvideocut.audio.energy_curve import (
+    compute_smoothed_energy,
+    detect_energy_transitions,
+)
 from trailvideocut.audio.models import AudioAnalysis
 from trailvideocut.audio.structure import MusicalStructureAnalyzer
 from trailvideocut.config import TrailVideoCutConfig
@@ -53,6 +57,18 @@ class AnalysisWorker(QThread):
             if self._config.output_fps == 0:
                 self._config.output_fps = source_fps
 
+            # Detect energy transitions
+            energy_curve, energy_times = compute_smoothed_energy(
+                audio_analysis.onset_envelope,
+                audio_analysis.sample_rate,
+                smooth_window_sec=self._config.energy_smooth_window,
+            )
+            energy_transitions = detect_energy_transitions(
+                energy_curve,
+                energy_times,
+                min_magnitude=self._config.energy_transition_threshold,
+            )
+
             # Phase 3: cut point selection
             self.status.emit("Selecting cut points...")
             cut_points = select_cut_points(
@@ -61,12 +77,17 @@ class AnalysisWorker(QThread):
                 audio_analysis.tempo,
                 self._config.min_segment_duration,
                 self._config.max_segment_duration,
+                energy_transitions=energy_transitions,
             )
 
             # Phase 4: segment selection
             self.status.emit("Selecting best segments...")
             selector = SegmentSelector(self._config)
-            cut_plan = selector.select(audio_analysis, segments, cut_points=cut_points)
+            cut_plan = selector.select(
+                audio_analysis, segments,
+                cut_points=cut_points,
+                energy_transitions=energy_transitions,
+            )
 
             self.status.emit("Analysis complete.")
             self.finished.emit(audio_analysis, segments, cut_plan, source_fps)

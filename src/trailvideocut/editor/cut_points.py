@@ -4,8 +4,10 @@ Selects which beats become cut points based on musical energy sections.
 High-energy sections produce more cuts; low-energy sections produce fewer.
 """
 
+import bisect
 import math
 
+from trailvideocut.audio.energy_curve import EnergyTransition
 from trailvideocut.audio.models import BeatInfo, MusicSection
 
 
@@ -21,7 +23,7 @@ def energy_to_density(
     """
     max_density = min(tempo / 60.0, 1.0 / min_segment)
     min_density = 1.0 / max_segment
-    scaled = energy ** 3.0
+    scaled = energy ** 2.0
     return min_density + scaled * (max_density - min_density)
 
 
@@ -126,6 +128,7 @@ def select_cut_points(
     tempo: float,
     min_segment: float,
     max_segment: float,
+    energy_transitions: list[EnergyTransition] | None = None,
 ) -> list[BeatInfo]:
     """Select cut points from all beats using energy-driven density per section.
 
@@ -164,6 +167,12 @@ def select_cut_points(
 
     # Safety net: split any remaining gaps > max_segment with synthetic beats
     cut_points = _enforce_max_segment(cut_points, beats, max_segment)
+
+    # Insert cuts at significant energy transitions within gaps
+    if energy_transitions:
+        cut_points = _insert_transition_cuts(
+            cut_points, beats, energy_transitions, min_segment
+        )
 
     return cut_points
 
@@ -216,4 +225,68 @@ def _enforce_max_segment(
                 beat_set.add(round(ts, 6))
         result.append(cp)
 
+    return result
+
+
+def _insert_transition_cuts(
+    cut_points: list[BeatInfo],
+    beats: list[BeatInfo],
+    transitions: list[EnergyTransition],
+    min_segment: float,
+) -> list[BeatInfo]:
+    """Insert forced cut points at energy transitions that fall within gaps.
+
+    For each energy transition, if it falls within a gap between existing
+    cut points and both sides would respect min_segment, insert the nearest
+    beat as a new cut point.
+    """
+    if len(cut_points) < 2 or not transitions or not beats:
+        return cut_points
+
+    cp_times = [cp.timestamp for cp in cut_points]
+    beat_times = [b.timestamp for b in beats]
+    cp_set = {round(t, 6) for t in cp_times}
+
+    new_cuts: list[BeatInfo] = []
+
+    for tr in transitions:
+        # Find which gap this transition falls into
+        pos = bisect.bisect_right(cp_times, tr.timestamp)
+        if pos == 0 or pos >= len(cp_times):
+            continue  # outside cut point range
+
+        prev_cp = cp_times[pos - 1]
+        next_cp = cp_times[pos]
+
+        # Skip if transition is already near an existing cut point
+        if tr.timestamp - prev_cp < min_segment or next_cp - tr.timestamp < min_segment:
+            continue
+
+        # Find the nearest beat to the transition
+        beat_pos = bisect.bisect_left(beat_times, tr.timestamp)
+        best_beat = None
+        best_dist = float("inf")
+        for idx in range(max(0, beat_pos - 1), min(len(beats), beat_pos + 2)):
+            b = beats[idx]
+            if round(b.timestamp, 6) in cp_set:
+                continue
+            dist = abs(b.timestamp - tr.timestamp)
+            # Check min_segment from both neighbors
+            if b.timestamp - prev_cp >= min_segment and next_cp - b.timestamp >= min_segment:
+                if dist < best_dist:
+                    best_dist = dist
+                    best_beat = b
+
+        if best_beat is not None:
+            new_cuts.append(best_beat)
+            cp_set.add(round(best_beat.timestamp, 6))
+            # Update cp_times for subsequent transitions
+            bisect.insort(cp_times, best_beat.timestamp)
+
+    if not new_cuts:
+        return cut_points
+
+    # Merge and sort
+    result = list(cut_points) + new_cuts
+    result.sort(key=lambda b: b.timestamp)
     return result

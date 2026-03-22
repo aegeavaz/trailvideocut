@@ -1,5 +1,6 @@
 import pytest
 
+from trailvideocut.audio.energy_curve import EnergyTransition
 from trailvideocut.audio.models import BeatInfo, MusicSection
 from trailvideocut.editor.cut_points import (
     energy_to_density,
@@ -40,7 +41,7 @@ class TestEnergyToDensity:
         density = energy_to_density(energy=0.5, tempo=120.0, min_segment=0.5, max_segment=8.0)
         min_d = 1.0 / 8.0
         max_d = min(120.0 / 60.0, 1.0 / 0.5)  # 2.0
-        expected = min_d + (0.5 ** 3) * (max_d - min_d)
+        expected = min_d + (0.5 ** 2) * (max_d - min_d)
         assert abs(density - expected) < 1e-9
 
     def test_density_increases_with_energy(self):
@@ -278,3 +279,69 @@ class TestSelectCutPoints:
         timestamps = [b.timestamp for b in result]
         # The new section's first beat at 2.3 should be present (swapped in)
         assert 2.3 in timestamps
+
+
+class TestTransitionCuts:
+    def test_transition_forces_cut_in_long_gap(self):
+        """An energy transition within a long gap should force a cut point."""
+        beats = _make_beats(20, interval=0.5)  # 0-10s
+        sections = [MusicSection("verse", 0.0, 10.0, 0.1)]  # low energy = few cuts
+        # Without transitions
+        base_cuts = select_cut_points(beats, sections, 120.0, 1.0, 8.0)
+
+        # Add a transition at t=5.0
+        transitions = [EnergyTransition(timestamp=5.0, magnitude=0.5, direction="up")]
+        cuts_with_transition = select_cut_points(
+            beats, sections, 120.0, 1.0, 8.0, energy_transitions=transitions
+        )
+
+        # Should have at least one more cut near t=5.0
+        near_5 = [c for c in cuts_with_transition if 4.0 <= c.timestamp <= 6.0]
+        assert len(near_5) >= 1
+        assert len(cuts_with_transition) >= len(base_cuts)
+
+    def test_transition_respects_min_segment(self):
+        """Transition cut should not be inserted if it would violate min_segment."""
+        beats = _make_beats(10, interval=0.5)
+        sections = [MusicSection("verse", 0.0, 5.0, 0.9)]  # high energy = dense cuts
+        transitions = [EnergyTransition(timestamp=1.0, magnitude=0.5, direction="up")]
+        cuts = select_cut_points(
+            beats, sections, 120.0, 1.0, 8.0, energy_transitions=transitions
+        )
+        for i in range(1, len(cuts)):
+            gap = cuts[i].timestamp - cuts[i - 1].timestamp
+            assert gap >= 1.0 - 0.01
+
+    def test_no_transitions_backward_compatible(self):
+        """Passing no transitions should produce identical results."""
+        beats = _make_beats(20, interval=0.5)
+        sections = [MusicSection("verse", 0.0, 10.0, 0.5)]
+        cuts_none = select_cut_points(beats, sections, 120.0, 1.0, 8.0, energy_transitions=None)
+        cuts_empty = select_cut_points(beats, sections, 120.0, 1.0, 8.0, energy_transitions=[])
+        assert [c.timestamp for c in cuts_none] == [c.timestamp for c in cuts_empty]
+
+    def test_transition_outside_range_ignored(self):
+        """Transitions outside the cut point range should be ignored."""
+        beats = _make_beats(10, interval=0.5)
+        sections = [MusicSection("verse", 0.0, 5.0, 0.5)]
+        transitions = [EnergyTransition(timestamp=100.0, magnitude=0.8, direction="up")]
+        cuts_with = select_cut_points(
+            beats, sections, 120.0, 1.0, 8.0, energy_transitions=transitions
+        )
+        cuts_without = select_cut_points(beats, sections, 120.0, 1.0, 8.0)
+        assert [c.timestamp for c in cuts_with] == [c.timestamp for c in cuts_without]
+
+    def test_multiple_transitions_insert_multiple_cuts(self):
+        """Multiple well-spaced transitions should each get a cut point."""
+        beats = _make_beats(40, interval=0.5)  # 0-20s
+        sections = [MusicSection("verse", 0.0, 20.0, 0.05)]  # very low energy
+        base_cuts = select_cut_points(beats, sections, 120.0, 1.0, 8.0)
+
+        transitions = [
+            EnergyTransition(timestamp=5.0, magnitude=0.5, direction="up"),
+            EnergyTransition(timestamp=12.0, magnitude=0.6, direction="down"),
+        ]
+        cuts_with = select_cut_points(
+            beats, sections, 120.0, 1.0, 8.0, energy_transitions=transitions
+        )
+        assert len(cuts_with) >= len(base_cuts) + 1

@@ -1,6 +1,7 @@
 import bisect
 import statistics
 
+from trailvideocut.audio.energy_curve import EnergyTransition
 from trailvideocut.audio.models import AudioAnalysis, BeatInfo, MusicSection
 from trailvideocut.config import TrailVideoCutConfig
 from trailvideocut.editor.models import CutPlan, EditDecision
@@ -23,6 +24,7 @@ class SegmentSelector:
         audio: AudioAnalysis,
         segments: list[VideoSegment],
         cut_points: list[BeatInfo] | None = None,
+        energy_transitions: list[EnergyTransition] | None = None,
     ) -> CutPlan:
         """Produce a CutPlan using global score-ranked selection."""
         beats = cut_points if cut_points is not None else audio.beats
@@ -58,7 +60,7 @@ class SegmentSelector:
             n_to_remove = int(n_intervals * reduction_fraction)
             target_clips = max(2, n_intervals - n_to_remove)
             merged_intervals = self._merge_low_energy_intervals(
-                intervals, audio.sections, target_clips
+                intervals, audio.sections, target_clips, energy_transitions
             )
             # Merging may stop early due to max_segment_duration cap;
             # use actual merged count so selected length matches.
@@ -108,7 +110,7 @@ class SegmentSelector:
             )
 
         # Merge consecutive decisions with adjacent source positions
-        merged = self._merge_continuous(decisions)
+        merged = self._merge_continuous(decisions, energy_transitions, audio.sections)
 
         return CutPlan(
             decisions=merged,
@@ -135,7 +137,7 @@ class SegmentSelector:
         2. Greedily fill remaining slots by score with overlap prevention
         3. Sort chronologically and return
         """
-        min_spacing = self.config.segment_window / 2  # overlap prevention only
+        min_spacing = self.config.segment_window  # no source overlap between selections
 
         # Cluster density limit: prevent too many segments from one source region
         cluster_range = self.config.segment_window * 2
@@ -263,11 +265,13 @@ class SegmentSelector:
         intervals: list[tuple[BeatInfo, BeatInfo]],
         sections: list[MusicSection],
         target_count: int,
+        energy_transitions: list[EnergyTransition] | None = None,
     ) -> list[tuple[BeatInfo, BeatInfo]]:
         """Merge adjacent intervals to reduce count, preferring low-energy sections.
 
         Merges the pair whose combined midpoint has the lowest energy first.
-        Skips pairs whose combined duration would exceed max_segment_duration.
+        Skips pairs whose combined duration would exceed max_segment_duration
+        or that would span an energy transition.
         """
         max_dur = self.config.max_segment_duration
         merged = list(intervals)
@@ -279,6 +283,20 @@ class SegmentSelector:
                 combined_dur = merged[i + 1][1].timestamp - merged[i][0].timestamp
                 if combined_dur > max_dur:
                     continue  # Skip: would exceed max duration
+                # Skip if an energy transition falls between these intervals
+                if energy_transitions:
+                    boundary_start = merged[i][1].timestamp
+                    boundary_end = merged[i + 1][0].timestamp
+                    if any(
+                        boundary_start - 0.5 <= t.timestamp <= boundary_end + 0.5
+                        for t in energy_transitions
+                    ):
+                        continue
+                # Skip if a section boundary with significant energy change falls between
+                if self._crosses_energy_boundary(
+                    merged[i][1].timestamp, merged[i + 1][0].timestamp, sections
+                ):
+                    continue
                 mid = (merged[i][0].timestamp + merged[i + 1][1].timestamp) / 2
                 energy = self._energy_at(mid, sections)
                 if energy < best_energy:
@@ -306,6 +324,18 @@ class SegmentSelector:
             weighted_energy += s.energy * dur
             total_weight += dur
         return weighted_energy / total_weight if total_weight > 0 else 0.5
+
+    def _crosses_energy_boundary(
+        self,
+        time_a: float,
+        time_b: float,
+        sections: list[MusicSection],
+        energy_diff_threshold: float = 0.3,
+    ) -> bool:
+        """Check if two timestamps fall in sections with significantly different energy."""
+        energy_a = self._energy_at(time_a, sections)
+        energy_b = self._energy_at(time_b, sections)
+        return abs(energy_a - energy_b) >= energy_diff_threshold
 
     def _energy_at(self, timestamp: float, sections: list[MusicSection]) -> float:
         """Get the energy level at a given timestamp from music sections."""
@@ -399,12 +429,19 @@ class SegmentSelector:
         end = start + needed_duration
         return start, end
 
-    def _merge_continuous(self, decisions: list[EditDecision]) -> list[EditDecision]:
+    def _merge_continuous(
+        self,
+        decisions: list[EditDecision],
+        energy_transitions: list[EnergyTransition] | None = None,
+        sections: list[MusicSection] | None = None,
+    ) -> list[EditDecision]:
         """Merge consecutive decisions whose source positions are adjacent.
 
         Consecutive decisions that pick from nearby source positions
         (gap < segment_window) get merged into a single longer clip.
-        Merging stops when the resulting clip would exceed max_segment_duration.
+        Merging stops when the resulting clip would exceed max_segment_duration,
+        would span an energy transition, or would cross a section boundary
+        with a significant energy change.
         """
         if len(decisions) <= 1:
             return decisions
@@ -422,7 +459,24 @@ class SegmentSelector:
             gap = curr.source_start - prev.source_end
             would_be_duration = curr.target_end - group_start.target_start
 
-            if gap < threshold and would_be_duration <= max_dur:
+            # Check if merging would span an energy transition
+            spans_transition = False
+            if energy_transitions:
+                for t in energy_transitions:
+                    if group_start.target_start < t.timestamp < curr.target_end:
+                        # Transition falls within the would-be merged clip
+                        if t.timestamp > prev.target_start:
+                            spans_transition = True
+                            break
+
+            # Check if merging would cross a section boundary with significant energy change
+            crosses_section = False
+            if sections and not spans_transition:
+                crosses_section = self._crosses_energy_boundary(
+                    group_start.target_start, curr.target_end, sections
+                )
+
+            if gap < threshold and would_be_duration <= max_dur and not spans_transition and not crosses_section:
                 group_target_end = curr.target_end
             else:
                 total_dur = group_target_end - group_start.target_start
@@ -436,9 +490,9 @@ class SegmentSelector:
                     interest_score=group_start.interest_score,
                 ))
                 group_start = curr
-                # Duration cap break: advance source past flushed clip
-                # Gap break: start fresh at curr's source position
-                if gap < threshold:
+                # Duration cap break on continuous source: advance past flushed clip
+                # Transition/section/gap break: start fresh with different footage
+                if gap < threshold and not spans_transition and not crosses_section:
                     group_source_start = flushed_source_end
                 else:
                     group_source_start = curr.source_start
@@ -454,15 +508,17 @@ class SegmentSelector:
             interest_score=group_start.interest_score,
         ))
 
-        # Eliminate any remaining source overlaps between groups
+        # Eliminate any remaining source overlaps or near-zero gaps between groups
+        min_source_gap = self.config.min_segment_duration
         for i in range(1, len(merged)):
             prev_end = merged[i - 1].source_end
-            if merged[i].source_start < prev_end:
+            if merged[i].source_start < prev_end + min_source_gap:
                 target_dur = merged[i].target_end - merged[i].target_start
+                new_start = prev_end + min_source_gap
                 merged[i] = EditDecision(
                     beat_index=merged[i].beat_index,
-                    source_start=prev_end,
-                    source_end=prev_end + target_dur,
+                    source_start=new_start,
+                    source_end=new_start + target_dur,
                     target_start=merged[i].target_start,
                     target_end=merged[i].target_end,
                     interest_score=merged[i].interest_score,

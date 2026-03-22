@@ -33,6 +33,10 @@ class TrailVideoCutConfig:
     max_segment_duration: float = 8.0
     include_timestamps: list[float] = field(default_factory=list)
 
+    # Energy transition detection
+    energy_transition_threshold: float = 0.3  # min energy change (0-1) to force a cut
+    energy_smooth_window: float = 1.0  # smoothing window in seconds
+
     # Quality-adaptive selection
     quality_cv_threshold: float = 0.4
     quality_max_reduction: float = 0.5
