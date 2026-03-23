@@ -56,9 +56,9 @@ class ReviewPage(QWidget):
         nav = QHBoxLayout()
         btn_back = QPushButton("<< Back to Setup")
         btn_back.clicked.connect(self._on_back)
-        self._btn_preview = QPushButton("Preview")
+        self._btn_preview = QPushButton("Preview Mode")
         self._btn_preview.setEnabled(False)
-        self._btn_preview.setToolTip("Play clips in sequence synced with music")
+        self._btn_preview.setToolTip("Enter preview mode to play clips synced with music using player controls")
         self._btn_preview.clicked.connect(self._toggle_preview)
         self._btn_export = QPushButton("Export >>")
         self._btn_export.setProperty("primary", True)
@@ -225,7 +225,7 @@ class ReviewPage(QWidget):
         # Clip info
         self._clip_info.setText("Click a clip on the timeline to see details")
 
-    # --- Preview ---
+    # --- Preview Mode ---
 
     def _ensure_music_player(self):
         if self._music_player is not None:
@@ -238,11 +238,12 @@ class ReviewPage(QWidget):
 
     def _toggle_preview(self):
         if self._previewing:
-            self._stop_preview()
+            self._exit_preview_mode()
         else:
-            self._start_preview()
+            self._enter_preview_mode()
 
-    def _start_preview(self):
+    def _enter_preview_mode(self):
+        """Enter preview mode without auto-playing."""
         clips = self._timeline.clips
         if not clips or not self._audio_path:
             return
@@ -257,55 +258,86 @@ class ReviewPage(QWidget):
         self._player.set_muted(True)
 
         # Disconnect normal playback signals to avoid interference
-        self._player.position_changed.disconnect(self._timeline.set_cursor_position)
-        self._player.position_changed.disconnect(self._check_clip_boundary)
+        try:
+            self._player.position_changed.disconnect(self._timeline.set_cursor_position)
+        except RuntimeError:
+            pass
+        try:
+            self._player.position_changed.disconnect(self._check_clip_boundary)
+        except RuntimeError:
+            pass
 
-        # Disable export and timeline interaction during preview
+        # Set transport callback and external control on VideoPlayer
+        self._player.set_transport_callback(self._handle_transport)
+        self._player.set_external_control(True)
+
+        # Set slider to audio duration
+        audio_duration_ms = int(self._audio.duration * 1000) if self._audio else 0
+        self._player.set_slider_range_ms(audio_duration_ms)
+        self._player.set_slider_position_ms(0)
+        self._player.update_time_label_external(0.0, self._audio.duration if self._audio else 0.0)
+
+        # Disable export during preview, but keep timeline enabled
         self._btn_export.setEnabled(False)
-        self._timeline.setEnabled(False)
 
-        # Update button
-        self._btn_preview.setText("Stop Preview")
+        # Update button appearance
+        self._btn_preview.setText("Exit Preview")
+        self._btn_preview.setStyleSheet(
+            "background-color: #4CAF50; color: white; font-weight: bold;"
+        )
 
         # Show preview status and green cursor
         self._preview_status.setVisible(True)
-        self._preview_status.setText("Preview: 00:00 / 00:00")
+        self._preview_status.setText("Preview Mode — paused")
         self._timeline.set_cursor_color("#4CAF50")
 
-        # Lazy-init and load music
+        # Lazy-init and load music (but don't play yet)
         self._ensure_music_player()
         self._music_player.setSource(QUrl.fromLocalFile(self._audio_path))
 
-        # Seek video to first clip's source position
+        # Seek video to first clip's source position, paused
         first = self._preview_decisions[0]
         self._player.seek_to(first.source_start)
+        self._player.pause()
 
-        # Start both players
-        self._music_player.play()
-        self._player.play()
+        # Show first clip info
+        orig_idx = self._timeline.clips.index(first) if first in self._timeline.clips else 0
+        self._timeline._selected = orig_idx
+        self._timeline.update()
+        self._show_clip_info(orig_idx)
 
-    def _stop_preview(self):
+    def _exit_preview_mode(self):
+        """Exit preview mode and restore normal controls."""
         if not self._previewing:
             return
         self._previewing = False
 
-        # Stop music, release audio device, pause video, unmute
+        # Stop music, release audio device
         if self._music_player is not None:
             self._music_player.stop()
             self._music_player.setSource(QUrl())
+
+        # Pause video, unmute
         self._player.pause()
         self._player.set_muted(False)
 
-        # Reconnect normal signals
+        # Clear transport callback and external control
+        self._player.set_transport_callback(None)
+        self._player.set_external_control(False)
+
+        # Restore slider to video duration
+        self._player.restore_slider_range()
+
+        # Reconnect normal signals (safe with try/except)
         self._player.position_changed.connect(self._timeline.set_cursor_position)
         self._player.position_changed.connect(self._check_clip_boundary)
 
         # Re-enable controls
         self._btn_export.setEnabled(True)
-        self._timeline.setEnabled(True)
 
         # Reset UI
-        self._btn_preview.setText("Preview")
+        self._btn_preview.setText("Preview Mode")
+        self._btn_preview.setStyleSheet("")
         self._preview_status.setVisible(False)
         self._timeline.set_cursor_color("#42A5F5")
         self._preview_clip_index = -1
@@ -314,19 +346,98 @@ class ReviewPage(QWidget):
 
     def _stop_preview_if_active(self):
         if self._previewing:
-            self._stop_preview()
+            self._exit_preview_mode()
+
+    # --- Preview transport ---
+
+    def _handle_transport(self, action: str, *args):
+        """Dispatch transport actions to preview methods."""
+        if action == "toggle_play":
+            self._preview_toggle_play()
+        elif action == "go_start":
+            self._preview_go_start()
+        elif action == "go_end":
+            self._preview_go_end()
+        elif action == "jump_forward":
+            self._preview_jump(5000)
+        elif action == "jump_back":
+            self._preview_jump(-5000)
+        elif action == "step_forward":
+            frame_ms = int(1000.0 / self._player._fps)
+            self._preview_step(frame_ms)
+        elif action == "step_back":
+            frame_ms = int(1000.0 / self._player._fps)
+            self._preview_step(-frame_ms)
+        elif action in ("seek", "slider_moved"):
+            self._preview_seek_ms(args[0])
+        elif action == "wheel":
+            self._preview_step(args[0])
+
+    def _preview_toggle_play(self):
+        """Toggle play/pause for both music and video."""
+        if self._music_player is None:
+            return
+        if self._music_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self._music_player.pause()
+            self._player.pause()
+        else:
+            self._music_player.play()
+            # Video play is managed by _on_music_position when it finds the right clip
+
+    def _preview_go_start(self):
+        if self._music_player:
+            self._music_player.setPosition(0)
+            self._on_music_position(0)
+
+    def _preview_go_end(self):
+        if self._music_player and self._audio:
+            end_ms = max(0, int(self._audio.duration * 1000) - 100)
+            self._music_player.setPosition(end_ms)
+            self._on_music_position(end_ms)
+
+    def _preview_jump(self, delta_ms: int):
+        if self._music_player and self._audio:
+            current = self._music_player.position()
+            total = int(self._audio.duration * 1000)
+            new_pos = max(0, min(current + delta_ms, total))
+            self._music_player.setPosition(new_pos)
+            self._on_music_position(new_pos)
+
+    def _preview_step(self, delta_ms: int):
+        if self._music_player and self._audio:
+            current = self._music_player.position()
+            total = int(self._audio.duration * 1000)
+            new_pos = max(0, min(current + delta_ms, total))
+            self._music_player.setPosition(new_pos)
+            self._on_music_position(new_pos)
+
+    def _preview_seek_ms(self, position_ms: int):
+        if self._music_player:
+            self._music_player.setPosition(position_ms)
+            self._on_music_position(position_ms)
+
+    # --- Music sync ---
 
     def _on_music_position(self, music_pos_ms: int):
         if not self._previewing:
             return
 
         music_pos = music_pos_ms / 1000.0
+        total = self._audio.duration if self._audio else 0
+        music_playing = (
+            self._music_player is not None
+            and self._music_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+        )
 
         # Update preview status label
-        total = self._audio.duration if self._audio else 0
+        state = "playing" if music_playing else "paused"
         self._preview_status.setText(
-            f"Preview: {self._fmt(music_pos)} / {self._fmt(total)}"
+            f"Preview Mode — {state} — {self._fmt(music_pos)} / {self._fmt(total)}"
         )
+
+        # Update slider and time label on the VideoPlayer
+        self._player.set_slider_position_ms(music_pos_ms)
+        self._player.update_time_label_external(music_pos, total)
 
         # Find which clip should be playing at this music position
         clip_idx = self._find_clip_for_target(music_pos)
@@ -345,22 +456,26 @@ class ReviewPage(QWidget):
             # New clip — seek video to correct source position
             self._preview_clip_index = clip_idx
             self._player.seek_to(expected_source_pos)
-            self._player.play()
-            # Highlight this clip on the timeline
+            if music_playing:
+                self._player.play()
+
+            # Highlight this clip on the timeline and show its info
             orig_idx = self._timeline.clips.index(clip) if clip in self._timeline.clips else -1
             if orig_idx >= 0:
                 self._timeline._selected = orig_idx
                 self._timeline.update()
+                self._show_clip_info(orig_idx)
         else:
             # Same clip — check drift and correct if needed
             current_video_pos = self._player.current_time
             drift = abs(current_video_pos - expected_source_pos)
             if drift > 0.15:
                 self._player.seek_to(expected_source_pos)
-                self._player.play()
+                if music_playing:
+                    self._player.play()
 
-            # Resume video if it was paused (e.g. after a gap)
-            if self._player._player.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
+            # Resume video if it was paused (e.g. after a gap) and music is playing
+            if music_playing and self._player._player.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
                 self._player.play()
 
         # Update timeline cursor to expected source position
@@ -379,14 +494,16 @@ class ReviewPage(QWidget):
         return -1
 
     def _on_music_status(self, status):
-        if status == QMediaPlayer.MediaStatus.EndOfMedia:
-            self._stop_preview()
+        if status == QMediaPlayer.MediaStatus.EndOfMedia and self._previewing:
+            # Stay in preview mode — user can seek back
+            self._player.pause()
+            self._preview_status.setText("Preview Mode — finished")
 
     # --- Keyboard ---
 
     def _on_space(self):
         if self._previewing:
-            self._stop_preview()
+            self._preview_toggle_play()
         else:
             self._player.toggle_play()
 
@@ -396,22 +513,15 @@ class ReviewPage(QWidget):
 
     # --- Clip interaction ---
 
-    def _on_clip_selected(self, index: int):
-        if self._previewing:
-            return
-
+    def _show_clip_info(self, index: int):
+        """Update the Selected Clip panel for clip at index."""
         if index < 0 or index >= len(self._timeline.clips):
             self._clip_info.setText("No clip selected")
-            self._active_clip_end = None
             return
 
         clip = self._timeline.clips[index]
         duration = clip.source_end - clip.source_start
         target_dur = clip.target_end - clip.target_start
-
-        # Seek video to clip start and set auto-stop boundary
-        self._player.seek_to(clip.source_start)
-        self._active_clip_end = clip.source_end
 
         # Find section
         section_label = "unknown"
@@ -433,10 +543,31 @@ class ReviewPage(QWidget):
             f"Section:  {section_label} (energy: {section_energy:.2f})"
         )
 
+    def _on_clip_selected(self, index: int):
+        if self._previewing:
+            # Seek preview to this clip's target position
+            if 0 <= index < len(self._timeline.clips):
+                clip = self._timeline.clips[index]
+                if self._music_player:
+                    self._music_player.setPosition(int(clip.target_start * 1000))
+                    self._on_music_position(int(clip.target_start * 1000))
+            return
+
+        if index < 0 or index >= len(self._timeline.clips):
+            self._clip_info.setText("No clip selected")
+            self._active_clip_end = None
+            return
+
+        clip = self._timeline.clips[index]
+
+        # Seek video to clip start and set auto-stop boundary
+        self._player.seek_to(clip.source_start)
+        self._active_clip_end = clip.source_end
+        self._show_clip_info(index)
+
     def _on_user_seeked(self):
         if self._previewing:
-            self._stop_preview()
-            return
+            return  # Transport callback handles this; should not fire
         if self._timeline.selected_index >= 0:
             self._timeline.select_clip(-1)
 
@@ -467,7 +598,15 @@ class ReviewPage(QWidget):
             return
         current = self._timeline.selected_index
         new_index = max(0, current - 1) if current >= 0 else 0
-        self._timeline.select_clip(new_index)
+        if self._previewing:
+            clip = clips[new_index]
+            self._timeline._selected = new_index
+            self._timeline.update()
+            if self._music_player:
+                self._music_player.setPosition(int(clip.target_start * 1000))
+                self._on_music_position(int(clip.target_start * 1000))
+        else:
+            self._timeline.select_clip(new_index)
 
     def _next_clip(self):
         clips = self._timeline.clips
@@ -475,7 +614,15 @@ class ReviewPage(QWidget):
             return
         current = self._timeline.selected_index
         new_index = min(len(clips) - 1, current + 1) if current >= 0 else 0
-        self._timeline.select_clip(new_index)
+        if self._previewing:
+            clip = clips[new_index]
+            self._timeline._selected = new_index
+            self._timeline.update()
+            if self._music_player:
+                self._music_player.setPosition(int(clip.target_start * 1000))
+                self._on_music_position(int(clip.target_start * 1000))
+        else:
+            self._timeline.select_clip(new_index)
 
     def hideEvent(self, event):
         self._stop_preview_if_active()

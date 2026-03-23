@@ -81,6 +81,8 @@ class VideoPlayer(QWidget):
         self._fps = 30.0  # overwritten with real source FPS in load_video()
         self._want_play = False  # desired play/pause state (user intent)
         self._seeking = False
+        self._on_transport: callable | None = None
+        self._external_control: bool = False
 
         self._player.positionChanged.connect(self._on_position_changed)
         self._player.durationChanged.connect(self._on_duration_changed)
@@ -116,6 +118,9 @@ class VideoPlayer(QWidget):
         self._seek(int(seconds * 1000))
 
     def toggle_play(self):
+        if self._on_transport:
+            self._on_transport("toggle_play")
+            return
         if self._want_play:
             self.pause()
         else:
@@ -142,6 +147,33 @@ class VideoPlayer(QWidget):
         self._want_play = False
         self._btn_play.setText("Play")
         self._player.stop()
+
+    def set_transport_callback(self, cb: callable | None):
+        """Set callback(action, *args) that intercepts transport actions."""
+        self._on_transport = cb
+
+    def set_external_control(self, enabled: bool):
+        """When True, slider and time label are not auto-updated from video position."""
+        self._external_control = enabled
+
+    def set_slider_range_ms(self, duration_ms: int):
+        """Override slider range (e.g. for preview mode audio duration)."""
+        self._slider.setRange(0, duration_ms)
+
+    def set_slider_position_ms(self, position_ms: int):
+        """Set slider position externally."""
+        if not self._seeking:
+            self._slider.setValue(position_ms)
+
+    def update_time_label_external(self, current_s: float, total_s: float):
+        """Update time label from external source."""
+        self._time_label.setText(f"{self._fmt(current_s)} / {self._fmt(total_s)}")
+
+    def restore_slider_range(self):
+        """Restore slider range to the loaded video duration."""
+        self._slider.setRange(0, self._duration_ms)
+        self._slider.setValue(self._player.position())
+        self._update_time_label()
 
     # --- UI construction ---
 
@@ -245,9 +277,10 @@ class VideoPlayer(QWidget):
         self._update_time_label()
 
     def _on_position_changed(self, position_ms: int):
-        if not self._seeking:
-            self._slider.setValue(position_ms)
-        self._update_time_label()
+        if not self._external_control:
+            if not self._seeking:
+                self._slider.setValue(position_ms)
+            self._update_time_label()
         self.position_changed.emit(position_ms / 1000.0)
 
     def _on_state_changed(self, state):
@@ -280,31 +313,56 @@ class VideoPlayer(QWidget):
         self._seeking = True
 
     def _on_slider_released(self):
+        if self._on_transport:
+            self._on_transport("seek", self._slider.value())
+            self._seeking = False
+            return
         self._user_seek(self._slider.value())
         self._seeking = False
 
     def _on_slider_moved(self, value: int):
+        if self._on_transport:
+            self._on_transport("slider_moved", value)
+            return
         self._player.setPosition(value)
 
     # --- transport buttons ---
 
     def _go_start(self):
+        if self._on_transport:
+            self._on_transport("go_start")
+            return
         self._user_seek(0)
 
     def _go_end(self):
+        if self._on_transport:
+            self._on_transport("go_end")
+            return
         self._user_seek(max(0, self._duration_ms - 100))
 
     def _jump_forward(self):
+        if self._on_transport:
+            self._on_transport("jump_forward")
+            return
         self._user_seek(min(self._player.position() + 5000, self._duration_ms))
 
     def _jump_back(self):
+        if self._on_transport:
+            self._on_transport("jump_back")
+            return
         self._user_seek(max(self._player.position() - 5000, 0))
 
     def _step_forward(self):
+        if self._on_transport:
+            self._on_transport("step_forward")
+            return
         frame_ms = int(1000.0 / self._fps)
         self._user_seek(min(self._player.position() + frame_ms, self._duration_ms))
 
     def _step_back(self):
+        if self._on_transport:
+            self._on_transport("step_back")
+            return
         frame_ms = int(1000.0 / self._fps)
         self._user_seek(max(self._player.position() - frame_ms, 0))
 
@@ -323,6 +381,10 @@ class VideoPlayer(QWidget):
     def wheelEvent(self, event):
         delta = event.angleDelta().y()  # typically ±120 per notch
         step_ms = int(delta / 120 * 1000)  # 1 s per notch
+        if self._on_transport:
+            self._on_transport("wheel", step_ms)
+            event.accept()
+            return
         new_pos = max(0, min(self._player.position() + step_ms, self._duration_ms))
         self._user_seek(new_pos)
         event.accept()
