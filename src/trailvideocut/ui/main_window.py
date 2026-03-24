@@ -187,11 +187,12 @@ class MainWindow(QMainWindow):
 
     # --- Rendering ---
 
-    def _start_export(self, output_path: str, is_davinci: bool):
+    def _start_export(self, output_path: str, is_davinci: bool, blur_plates: bool = False):
         if self._config is None or self._cut_plan is None:
             return
 
         self._config.davinci = is_davinci
+        self._config.blur_plates = blur_plates
         self._config.output_path = Path(output_path)
 
         self._statusbar.showMessage("Exporting...")

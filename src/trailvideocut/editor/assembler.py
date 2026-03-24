@@ -74,22 +74,37 @@ class VideoAssembler:
         ):
             try:
                 self._assemble_ffmpeg_xfade(plan)
-                return
             except Exception as e:
                 console.print(
                     f"  [yellow]FFmpeg xfade failed ({e}), "
                     f"falling back to MoviePy...[/yellow]"
                 )
+                self._assemble_moviepy(plan)
         else:
             try:
                 self._assemble_ffmpeg_hardcut(plan)
-                return
             except Exception as e:
                 console.print(
                     f"  [yellow]FFmpeg hardcut failed ({e}), "
                     f"falling back to MoviePy...[/yellow]"
                 )
-        self._assemble_moviepy(plan)
+                self._assemble_moviepy(plan)
+
+        if self.config.blur_plates:
+            from trailvideocut.editor.plate_blur import PlateBlurrer
+
+            debug_dir = None
+            if self.config.blur_plates_debug:
+                debug_dir = self.config.output_path.parent / "blur_debug"
+                console.print(f"  Debug frames will be saved to {debug_dir}")
+
+            console.print("  Blurring license plates...")
+            blurrer = PlateBlurrer(debug_dir=debug_dir)
+            blurrer.blur_plates(
+                str(self.config.output_path),
+                str(self.config.output_path),
+                progress_callback=self._progress_callback,
+            )
 
     # ------------------------------------------------------------------
     # FFmpeg native xfade path (fast)

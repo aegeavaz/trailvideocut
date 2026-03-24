@@ -2,6 +2,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QCheckBox,
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
@@ -19,7 +20,7 @@ class ExportPage(QWidget):
     """Page 3: Export format, output path, and render progress."""
 
     back_requested = Signal()
-    start_export = Signal(str, bool)  # output_path, is_davinci
+    start_export = Signal(str, bool, bool)  # output_path, is_davinci, blur_plates
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -54,7 +55,16 @@ class ExportPage(QWidget):
         format_layout.addWidget(self._radio_davinci)
         format_layout.addWidget(otio_desc)
 
-        self._radio_davinci.toggled.connect(lambda: self._update_output_for_format())
+        self._chk_blur = QCheckBox("Blur license plates")
+        blur_desc = QLabel(
+            "Detect and blur plate numbers in the output video"
+            " (requires trailvideocut[blur])"
+        )
+        blur_desc.setStyleSheet("color: #888; font-size: 11px; margin-left: 22px;")
+        format_layout.addWidget(self._chk_blur)
+        format_layout.addWidget(blur_desc)
+
+        self._radio_davinci.toggled.connect(self._on_format_toggled)
 
         root.addWidget(format_group)
 
@@ -110,6 +120,13 @@ class ExportPage(QWidget):
         if path:
             self._output_path.setText(path)
 
+    def _on_format_toggled(self):
+        self._update_output_for_format()
+        is_davinci = self._radio_davinci.isChecked()
+        self._chk_blur.setEnabled(not is_davinci)
+        if is_davinci:
+            self._chk_blur.setChecked(False)
+
     def _on_start(self):
         output = self._output_path.text().strip()
         if not output:
@@ -124,10 +141,11 @@ class ExportPage(QWidget):
                     "Download: https://ffmpeg.org/download.html"
                 )
                 return
+        blur_plates = self._chk_blur.isChecked() and not is_davinci
         self._btn_start.setEnabled(False)
         self._progress_bar.setVisible(True)
         self._status_label.setText("Starting export...")
-        self.start_export.emit(output, is_davinci)
+        self.start_export.emit(output, is_davinci, blur_plates)
 
     def set_default_output(self, video_path: Path):
         """Set default output path based on the video file location."""

@@ -64,6 +64,12 @@ def cut(
     davinci: bool = typer.Option(
         False, "--davinci/--no-davinci", help="Export OTIO for DaVinci Resolve instead of rendering"
     ),
+    blur_plates: bool = typer.Option(
+        False, "--blur-plates/--no-blur-plates", help="Blur detected license plates"
+    ),
+    blur_debug: bool = typer.Option(
+        False, "--blur-debug/--no-blur-debug", help="Save detection debug frames to blur_debug/"
+    ),
 ):
     """Cut a motorcycle POV video to sync with a song's beats."""
     config = TrailVideoCutConfig(
@@ -85,6 +91,8 @@ def cut(
         use_gpu=gpu,
         gpu_batch_size=gpu_batch_size,
         davinci=davinci,
+        blur_plates=blur_plates,
+        blur_plates_debug=blur_debug,
     )
 
     console.print("[bold]TrailVideoCut[/] - Beat-synced video editor")
@@ -179,6 +187,34 @@ def analyze(
                 f"edge={seg.interest.edge_variance:.2f} "
                 f"bright={seg.interest.brightness_change:.2f})"
             )
+
+
+@app.command(name="detect")
+def detect_cmd(
+    video: Path = typer.Argument(..., help="Input video file", exists=True),
+    output: Path = typer.Option(
+        Path("detect_debug"), "-o", "--output", help="Output directory for debug frames"
+    ),
+):
+    """Run raw OCR detection on every frame and save annotated debug images."""
+    try:
+        from trailvideocut.editor.plate_blur import run_detection_debug
+    except ImportError:
+        console.print(
+            "[bold red]Error:[/] easyocr is required.\n"
+            "Install with: pip install 'trailvideocut[blur]'"
+        )
+        raise typer.Exit(code=1)
+
+    console.print(f"[bold]OCR Detection Debug[/]")
+    console.print(f"  Video: {video}")
+    console.print(f"  Output: {output}")
+
+    try:
+        run_detection_debug(str(video), output)
+    except Exception as e:
+        console.print(f"\n[bold red]Error:[/] {e}")
+        raise typer.Exit(code=1)
 
 
 @app.command(name="ui")

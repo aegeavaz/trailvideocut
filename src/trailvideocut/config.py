@@ -48,6 +48,10 @@ class TrailVideoCutConfig:
     # Export OTIO for DaVinci Resolve instead of rendering
     davinci: bool = False
 
+    # License plate blurring
+    blur_plates: bool = False
+    blur_plates_debug: bool = False
+
     # Output
     output_fps: float = 0
     output_codec: str = "libx264"
