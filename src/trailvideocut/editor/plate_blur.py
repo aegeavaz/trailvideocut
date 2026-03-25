@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import tempfile
+from collections import deque
 from pathlib import Path
 from typing import Callable
 
@@ -148,17 +149,17 @@ class PlateShapeDetector:
     def _in_excluded_zone(
         bbox: tuple[int, int, int, int], fh: int, fw: int,
     ) -> bool:
-        """Return True if bbox center falls in the bottom-center exclusion zone.
+        """Return True if bbox center falls in the bottom exclusion zone.
 
-        Discards detections in the horizontal middle third AND bottom 20% of
-        the frame — the region where the rider's own dashboard appears.
+        Discards detections in the horizontal middle 60% AND bottom 30% of
+        the frame — the region where the rider's dashboard and mirrors appear.
         """
         x1, y1, x2, y2 = bbox
         cx = (x1 + x2) / 2
         cy = (y1 + y2) / 2
-        in_middle_third_x = fw / 3 <= cx <= 2 * fw / 3
-        in_bottom_20_y = cy >= fh * 0.80
-        return in_middle_third_x and in_bottom_20_y
+        in_middle_60_x = fw * 0.20 <= cx <= fw * 0.80
+        in_bottom_30_y = cy >= fh * 0.70
+        return in_middle_60_x and in_bottom_30_y
 
     @staticmethod
     def _find_plates(
@@ -205,15 +206,223 @@ class PlateShapeDetector:
             plates.append((x1, y1, x2, y2))
         return plates
 
+class PlateGapFiller:
+    """Fill detection gaps with linearly interpolated positions.
+
+    Short gaps (≤ *max_gap*) are interpolated immediately when the next
+    detection arrives.  Longer gaps (up to *extended_gap*) are held in a
+    pending buffer; if *confirm_after* consecutive detections follow, the
+    gap is retroactively interpolated.  Gaps longer than *extended_gap*
+    are emitted as empty.
+
+    Results are emitted via :meth:`flush` as ``(plates, is_interpolated)``
+    tuples.
+    """
+
+    _Entry = tuple[list[tuple[int, int, int, int]], bool]
+
+    def __init__(
+        self,
+        detector: PlateShapeDetector,
+        max_gap: int = 3,
+        extended_gap: int = 15,
+        max_distance: float = 150.0,
+    ):
+        self._detector = detector
+        self._max_gap = max_gap
+        self._extended_gap = extended_gap
+        self._max_distance = max_distance
+
+        self._prev: list[tuple[int, int, int, int]] = []
+        self._resolved: deque[PlateGapFiller._Entry] = deque()
+        self._pending: list[PlateGapFiller._Entry] = []
+        self._gap_len = 0
+
+        # Isolation filter: 1-entry lookahead
+        self._held: PlateGapFiller._Entry | None = None
+        self._last_emitted_plates: list[tuple[int, int, int, int]] = []
+
+    def push(self, frame: np.ndarray) -> None:
+        """Detect plates in *frame* and buffer the result."""
+        plates = self._detector.detect(frame)
+
+        if plates:
+            if self._gap_len > 0 and self._prev:
+                if self._gap_len <= self._max_gap and self._is_coherent(self._prev, plates):
+                    # Short gap with coherent endpoints — interpolate
+                    self._pending.append((plates, False))
+                    self._interpolate_short_gap(plates)
+                    self._resolve_pending()
+                    self._prev = plates
+                    self._gap_len = 0
+                elif self._is_coherent(self._prev, plates):
+                    # Long gap with coherent endpoints — interpolate
+                    self._pending.append((plates, False))
+                    self._interpolate_long_gap(plates)
+                    self._resolve_pending()
+                    self._prev = plates
+                    self._gap_len = 0
+                else:
+                    # Incoherent detection mid-gap — don't break the gap.
+                    # Include it in the buffer (isolation filter will strip
+                    # it later if it's truly isolated), but keep the gap
+                    # open looking for a coherent endpoint.
+                    self._pending.append((plates, False))
+                    self._gap_len += 1
+                    if self._gap_len > self._extended_gap:
+                        # Gap too long — give up on old _prev, start fresh
+                        self._resolve_pending()
+                        self._prev = plates
+                        self._gap_len = 0
+            else:
+                # No gap or no prev — just resolve
+                self._pending.append((plates, False))
+                self._resolve_pending()
+                # Only update _prev if coherent (or first detection).
+                # Prevents isolated false positives from poisoning the
+                # tracking state — the isolation filter will strip them
+                # from the output, but _prev must stay clean.
+                if not self._prev or self._is_coherent(self._prev, plates):
+                    self._prev = plates
+                self._gap_len = 0
+        else:
+            self._gap_len += 1
+            self._pending.append(([], False))
+
+            if self._gap_len > self._extended_gap:
+                self._resolve_pending()
+                self._prev = []
+                self._gap_len = 0
+
+    def flush(self) -> list[_Entry]:
+        """Return resolved frames ready to be emitted."""
+        result = list(self._resolved)
+        self._resolved.clear()
+        return result
+
+    def flush_all(self) -> list[_Entry]:
+        """Emit all remaining buffered frames (end of video)."""
+        if self._gap_len > 0 and self._gap_len <= self._max_gap and self._prev:
+            start = len(self._pending) - self._gap_len
+            for i in range(self._gap_len):
+                self._pending[start + i] = (self._prev, True)
+        self._resolve_pending()
+        self._flush_held()
+        self._gap_len = 0
+        self._prev = []
+        return self.flush()
+
+    def _resolve_pending(self) -> None:
+        """Move all pending frames through the isolation filter to resolved."""
+        for entry in self._pending:
+            self._filter_and_emit(entry)
+        self._pending.clear()
+
+    def _filter_and_emit(self, entry: _Entry) -> None:
+        """Emit the held entry (checking isolation) and hold the new one."""
+        if self._held is not None:
+            plates, is_interp = self._held
+            if plates and not is_interp:
+                # Real detection — check spatial coherence with neighbors
+                backward_ok = self._is_coherent(plates, self._last_emitted_plates)
+                forward_ok = self._is_coherent(plates, entry[0])
+                if not backward_ok and not forward_ok:
+                    # Isolated false positive — replace with interpolation
+                    # from neighbors if both have plates, else strip.
+                    fwd = entry[0]
+                    bwd = self._last_emitted_plates
+                    if bwd and fwd and self._is_coherent(bwd, fwd):
+                        n = min(len(bwd), len(fwd))
+                        interp = [self._lerp(bwd[pi], fwd[pi], 0.5) for pi in range(n)]
+                        self._held = (interp, True)
+                    else:
+                        self._held = ([], False)
+            held = self._held
+            self._resolved.append(held)
+            if held[0]:
+                self._last_emitted_plates = held[0]
+        self._held = entry
+
+    def _flush_held(self) -> None:
+        """Emit the last held entry (end of video — backward check only)."""
+        if self._held is not None:
+            plates, is_interp = self._held
+            if plates and not is_interp:
+                if not self._is_coherent(plates, self._last_emitted_plates):
+                    self._held = ([], False)
+            self._resolved.append(self._held)
+            self._held = None
+
+    def _is_coherent(
+        self,
+        plates_a: list[tuple[int, int, int, int]],
+        plates_b: list[tuple[int, int, int, int]],
+    ) -> bool:
+        """Return True if any plate in a is near any plate in b."""
+        if not plates_a or not plates_b:
+            return False
+        for a in plates_a:
+            cx_a = (a[0] + a[2]) / 2
+            cy_a = (a[1] + a[3]) / 2
+            for b in plates_b:
+                cx_b = (b[0] + b[2]) / 2
+                cy_b = (b[1] + b[3]) / 2
+                dist = ((cx_a - cx_b) ** 2 + (cy_a - cy_b) ** 2) ** 0.5
+                if dist <= self._max_distance:
+                    return True
+        return False
+
+    def _interpolate_short_gap(
+        self, next_plates: list[tuple[int, int, int, int]],
+    ) -> None:
+        """Interpolate the last ``_gap_len`` entries before the new detection."""
+        n = min(len(self._prev), len(next_plates))
+        total = self._gap_len + 1
+        # Gap frames end just before the last entry (the new detection)
+        gap_end = len(self._pending) - 1
+        gap_start = gap_end - self._gap_len
+        for gi in range(self._gap_len):
+            t = (gi + 1) / total
+            interp = [self._lerp(self._prev[pi], next_plates[pi], t) for pi in range(n)]
+            self._pending[gap_start + gi] = (interp, True)
+
+    def _interpolate_long_gap(
+        self, next_plates: list[tuple[int, int, int, int]],
+    ) -> None:
+        """Interpolate an extended gap using _prev and next_plates as endpoints."""
+        n = min(len(self._prev), len(next_plates))
+        total = self._gap_len + 1
+        gap_end = len(self._pending) - 1
+        gap_start = gap_end - self._gap_len
+        for gi in range(self._gap_len):
+            t = (gi + 1) / total
+            interp = [self._lerp(self._prev[pi], next_plates[pi], t) for pi in range(n)]
+            self._pending[gap_start + gi] = (interp, True)
+
+    @staticmethod
+    def _lerp(
+        a: tuple[int, int, int, int],
+        b: tuple[int, int, int, int],
+        t: float,
+    ) -> tuple[int, int, int, int]:
+        return (
+            int(a[0] + (b[0] - a[0]) * t),
+            int(a[1] + (b[1] - a[1]) * t),
+            int(a[2] + (b[2] - a[2]) * t),
+            int(a[3] + (b[3] - a[3]) * t),
+        )
+
+
 class PlateBlurrer:
     """Detects and blurs license plates in a video file.
 
     Uses OpenCV shape detection to find white rectangular regions
     matching European plate proportions, then applies Gaussian blur.
+    A gap-filler carries forward detections for brief dropouts.
     """
 
     def __init__(self, debug_dir: Path | None = None):
-        self._detector = PlateShapeDetector()
+        self._gap_filler = PlateGapFiller(PlateShapeDetector())
         self._debug_dir = debug_dir
         if debug_dir:
             debug_dir.mkdir(parents=True, exist_ok=True)
@@ -283,6 +492,7 @@ class PlateBlurrer:
 
         try:
             frame_idx = 0
+            frame_buffer: deque[tuple[int, np.ndarray]] = deque()
 
             with Progress(
                 TextColumn("  [cyan]Blurring plates"),
@@ -293,34 +503,39 @@ class PlateBlurrer:
             ) as progress:
                 task = progress.add_task("blur", total=total_frames or 1)
                 debug_summary: list[str] = []
+                emitted = 0
 
                 while True:
                     ret, frame = cap.read()
                     if not ret:
                         break
 
-                    plates = self._detector.detect(frame)
-
-                    if self._debug_dir:
-                        vis = frame.copy()
-                        for x1, y1, x2, y2 in plates:
-                            cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 255), 2)
-                        cv2.imwrite(
-                            str(self._debug_dir / f"frame_{frame_idx:06d}.jpg"), vis,
-                        )
-                        debug_summary.append(
-                            f"frame {frame_idx:06d}: {len(plates)} plates"
-                        )
-
-                    for bbox in plates:
-                        self.blur_region(frame, bbox)
-
-                    proc.stdin.write(frame.tobytes())
+                    self._gap_filler.push(frame)
+                    frame_buffer.append((frame_idx, frame))
                     frame_idx += 1
 
-                    progress.update(task, completed=frame_idx)
+                    for plates, is_interp in self._gap_filler.flush():
+                        emit_idx, emit_frame = frame_buffer.popleft()
+                        self._emit_frame(
+                            emit_idx, emit_frame, plates, is_interp,
+                            proc, debug_summary,
+                        )
+                        emitted += 1
+                        progress.update(task, completed=emitted)
+                        if progress_callback and total_frames > 0:
+                            progress_callback(emitted, total_frames)
+
+                # Flush remaining buffered frames at end of video
+                for plates, is_interp in self._gap_filler.flush_all():
+                    emit_idx, emit_frame = frame_buffer.popleft()
+                    self._emit_frame(
+                        emit_idx, emit_frame, plates, is_interp,
+                        proc, debug_summary,
+                    )
+                    emitted += 1
+                    progress.update(task, completed=emitted)
                     if progress_callback and total_frames > 0:
-                        progress_callback(frame_idx, total_frames)
+                        progress_callback(emitted, total_frames)
 
                 if self._debug_dir and debug_summary:
                     (self._debug_dir / "summary.txt").write_text(
@@ -348,6 +563,43 @@ class PlateBlurrer:
 
         Path(actual_output).replace(output_path)
 
+    def _emit_frame(
+        self,
+        frame_idx: int,
+        frame: np.ndarray,
+        plates: list[tuple[int, int, int, int]],
+        is_interpolated: bool,
+        proc: subprocess.Popen,
+        debug_summary: list[str],
+    ) -> None:
+        """Blur plates, write to FFmpeg pipe, and optionally save debug."""
+        if self._debug_dir:
+            vis = frame.copy()
+            color = (0, 255, 0) if is_interpolated else (0, 255, 255)
+            for x1, y1, x2, y2 in plates:
+                w, h = x2 - x1, y2 - y1
+                label = f"{w}x{h} ~" if is_interpolated else f"{w}x{h}"
+                cv2.rectangle(vis, (x1, y1), (x2, y2), color, 2)
+                cv2.putText(
+                    vis, label, (x1, y1 - 4),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1,
+                )
+            cv2.imwrite(
+                str(self._debug_dir / f"frame_{frame_idx:06d}.jpg"), vis,
+            )
+            box_strs = [f"({x1},{y1},{x2},{y2})" for x1, y1, x2, y2 in plates]
+            tag = " (interpolated)" if is_interpolated else ""
+            debug_summary.append(
+                f"frame {frame_idx:06d}: {len(plates)} plates"
+                + (f" [{' '.join(box_strs)}]" if box_strs else "")
+                + tag
+            )
+
+        for bbox in plates:
+            self.blur_region(frame, bbox)
+
+        proc.stdin.write(frame.tobytes())
+
     @staticmethod
     def blur_region(
         frame: np.ndarray, bbox: tuple[int, int, int, int],
@@ -363,11 +615,13 @@ class PlateBlurrer:
 
 
 def run_detection_debug(video_path: str, output_dir: Path) -> None:
-    """Run plate shape detection on every frame, save annotated frames + summary.
+    """Run plate detection with gap-filling on every frame.
 
-    Pure OpenCV — finds white rectangular regions with plate-like aspect ratio.
+    Saves annotated debug images and a summary.  Interpolated detections
+    are drawn in green (vs cyan for real detections) and tagged in the
+    summary.
     """
-    detector = PlateShapeDetector()
+    gap_filler = PlateGapFiller(PlateShapeDetector())
 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -377,7 +631,31 @@ def run_detection_debug(video_path: str, output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     summary_lines: list[str] = []
+    frame_buffer: deque[tuple[int, np.ndarray]] = deque()
     frame_idx = 0
+
+    def _emit(
+        idx: int, frame: np.ndarray,
+        plates: list[tuple[int, int, int, int]], is_interp: bool,
+    ) -> None:
+        color = (0, 255, 0) if is_interp else (0, 255, 255)
+        vis = frame.copy()
+        for x1, y1, x2, y2 in plates:
+            w, h = x2 - x1, y2 - y1
+            label = f"{w}x{h} ~" if is_interp else f"{w}x{h}"
+            cv2.rectangle(vis, (x1, y1), (x2, y2), color, 2)
+            cv2.putText(
+                vis, label, (x1, y1 - 4),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1,
+            )
+        cv2.imwrite(str(output_dir / f"frame_{idx:06d}.jpg"), vis)
+        box_strs = [f"({x1},{y1},{x2},{y2})" for x1, y1, x2, y2 in plates]
+        tag = " (interpolated)" if is_interp else ""
+        summary_lines.append(
+            f"frame {idx:06d}: {len(plates)} plates"
+            + (f" [{' '.join(box_strs)}]" if box_strs else "")
+            + tag
+        )
 
     with Progress(
         TextColumn("  [cyan]Detecting plates"),
@@ -387,39 +665,36 @@ def run_detection_debug(video_path: str, output_dir: Path) -> None:
         console=console,
     ) as progress:
         task = progress.add_task("detect", total=total_frames or 1)
+        emitted = 0
 
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
 
-            plates = detector.detect(frame)
-
-            vis = frame.copy()
-            for x1, y1, x2, y2 in plates:
-                w, h = x2 - x1, y2 - y1
-                cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 255), 2)
-                cv2.putText(
-                    vis, f"{w}x{h}", (x1, y1 - 4),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 255, 255), 1,
-                )
-
-            cv2.imwrite(str(output_dir / f"frame_{frame_idx:06d}.jpg"), vis)
-
-            box_strs = [f"({x1},{y1},{x2},{y2})" for x1, y1, x2, y2 in plates]
-            summary_lines.append(
-                f"frame {frame_idx:06d}: {len(plates)} plates"
-                + (f" [{' '.join(box_strs)}]" if box_strs else "")
-            )
-
+            gap_filler.push(frame)
+            frame_buffer.append((frame_idx, frame))
             frame_idx += 1
-            progress.update(task, completed=frame_idx)
+
+            for plates, is_interp in gap_filler.flush():
+                eidx, eframe = frame_buffer.popleft()
+                _emit(eidx, eframe, plates, is_interp)
+                emitted += 1
+                progress.update(task, completed=emitted)
+
+        for plates, is_interp in gap_filler.flush_all():
+            eidx, eframe = frame_buffer.popleft()
+            _emit(eidx, eframe, plates, is_interp)
+            emitted += 1
+            progress.update(task, completed=emitted)
 
     cap.release()
 
     (output_dir / "summary.txt").write_text("\n".join(summary_lines) + "\n")
+    interp_count = sum(1 for l in summary_lines if "(interpolated)" in l)
+    detect_count = sum(1 for l in summary_lines if "0 plates" not in l)
     console.print(
         f"  Done: {frame_idx} frames, "
-        f"{sum(1 for line in summary_lines if '0 plates' not in line)} with detections"
+        f"{detect_count} with detections ({interp_count} interpolated)"
     )
     console.print(f"  Output: {output_dir}")

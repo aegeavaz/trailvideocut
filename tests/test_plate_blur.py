@@ -343,9 +343,11 @@ class TestBlurPlatesPipeline:
         output_path = tmp_path.replace(".mp4", "_blurred.mp4")
 
         blurrer = PlateBlurrer()
-        mock_detector = MagicMock()
-        mock_detector.detect.return_value = [(30, 20, 150, 60)]
-        blurrer._detector = mock_detector
+        mock_gap_filler = MagicMock()
+        # flush() returns one result per push; flush_all() returns nothing
+        mock_gap_filler.flush.return_value = [([(30, 20, 150, 60)], False)]
+        mock_gap_filler.flush_all.return_value = []
+        blurrer._gap_filler = mock_gap_filler
 
         progress_calls = []
 
@@ -358,7 +360,7 @@ class TestBlurPlatesPipeline:
 
             assert Path(output_path).exists()
             assert len(progress_calls) == 5
-            assert mock_detector.detect.call_count == 5
+            assert mock_gap_filler.push.call_count == 5
         finally:
             Path(tmp_path).unlink(missing_ok=True)
             Path(output_path).unlink(missing_ok=True)
@@ -377,9 +379,10 @@ class TestBlurPlatesPipeline:
         writer.release()
 
         blurrer = PlateBlurrer()
-        mock_detector = MagicMock()
-        mock_detector.detect.return_value = []
-        blurrer._detector = mock_detector
+        mock_gap_filler = MagicMock()
+        mock_gap_filler.flush.return_value = [([], False)]
+        mock_gap_filler.flush_all.return_value = []
+        blurrer._gap_filler = mock_gap_filler
 
         try:
             blurrer.blur_plates(tmp_path, tmp_path)
@@ -387,3 +390,201 @@ class TestBlurPlatesPipeline:
             assert Path(tmp_path).stat().st_size > 0
         finally:
             Path(tmp_path).unlink(missing_ok=True)
+
+
+class TestPlateGapFiller:
+    """Tests for PlateGapFiller with interpolation."""
+
+    def _collect(self, filler, detections):
+        """Push a sequence of detections and collect all flushed results."""
+        frame = np.zeros((200, 300, 3), dtype=np.uint8)
+        detector = filler._detector
+        results = []
+        for det in detections:
+            detector.detect.return_value = det
+            filler.push(frame)
+            results.extend(filler.flush())
+        results.extend(filler.flush_all())
+        return results
+
+    def test_returns_detections_directly(self):
+        """When detector finds plates, those are returned not interpolated."""
+        from trailvideocut.editor.plate_blur import PlateGapFiller, PlateShapeDetector
+
+        detector = MagicMock(spec=PlateShapeDetector)
+        plates = [(100, 100, 130, 120)]
+        filler = PlateGapFiller(detector, max_gap=3)
+
+        results = self._collect(filler, [plates, plates])
+        assert len(results) == 2
+        for p, is_interp in results:
+            assert p == plates
+            assert is_interp is False
+
+    def test_interpolates_gap(self):
+        """Gap frames get linearly interpolated positions."""
+        from trailvideocut.editor.plate_blur import PlateGapFiller, PlateShapeDetector
+
+        detector = MagicMock(spec=PlateShapeDetector)
+        filler = PlateGapFiller(detector, max_gap=3)
+
+        # Detection → 2 misses → detection (plate moves 8px right)
+        seq = [
+            [(100, 100, 130, 120)],  # frame 0
+            [],                       # frame 1 (gap)
+            [],                       # frame 2 (gap)
+            [(108, 100, 138, 120)],  # frame 3
+        ]
+        results = self._collect(filler, seq)
+        assert len(results) == 4
+
+        # Frame 0: real detection
+        assert results[0] == ([(100, 100, 130, 120)], False)
+        # Frame 3: real detection
+        assert results[3] == ([(108, 100, 138, 120)], False)
+        # Frames 1-2: interpolated, marked True
+        assert results[1][1] is True
+        assert results[2][1] is True
+        # Check interpolated x1: should be ~102 and ~105
+        assert results[1][0][0][0] in range(101, 104)  # ~102
+        assert results[2][0][0][0] in range(104, 107)  # ~105
+
+    def test_extended_gap_coherent_interpolated(self):
+        """Long gap with coherent endpoints is interpolated immediately."""
+        from trailvideocut.editor.plate_blur import PlateGapFiller, PlateShapeDetector
+
+        detector = MagicMock(spec=PlateShapeDetector)
+        filler = PlateGapFiller(detector, max_gap=2, extended_gap=10, max_distance=150)
+
+        seq = [
+            [(100, 100, 130, 120)],  # frame 0
+            [], [], [], [], [],       # 5 misses (> max_gap=2, ≤ extended_gap=10)
+            [(112, 100, 142, 120)],  # frame 6 (coherent, dist=12)
+        ]
+        results = self._collect(filler, seq)
+        assert len(results) == 7
+        # Frame 0: real
+        assert results[0][1] is False
+        # Frames 1-5: interpolated
+        for i in range(1, 6):
+            assert results[i][1] is True
+            assert len(results[i][0]) == 1
+        # Interpolated x1 should progress from 100 toward 112
+        assert results[1][0][0][0] == 102  # t=1/6
+        assert results[5][0][0][0] == 110  # t=5/6
+        # Frame 6: real detection
+        assert results[6][1] is False
+
+    def test_extended_gap_incoherent_not_interpolated(self):
+        """Long gap with incoherent endpoints is not interpolated."""
+        from trailvideocut.editor.plate_blur import PlateGapFiller, PlateShapeDetector
+
+        detector = MagicMock(spec=PlateShapeDetector)
+        filler = PlateGapFiller(detector, max_gap=2, extended_gap=10, max_distance=100)
+
+        seq = [
+            [(100, 100, 130, 120)],
+            [], [], [],               # 3 misses > max_gap
+            [(900, 900, 930, 920)],  # far from prev (dist > 100)
+        ]
+        results = self._collect(filler, seq)
+        assert len(results) == 5
+        # Gap frames should be empty (endpoints not coherent)
+        assert results[1][0] == []
+        assert results[2][0] == []
+        assert results[3][0] == []
+
+    def test_exceeds_extended_gap(self):
+        """Gap longer than extended_gap is emitted as empty."""
+        from trailvideocut.editor.plate_blur import PlateGapFiller, PlateShapeDetector
+
+        detector = MagicMock(spec=PlateShapeDetector)
+        filler = PlateGapFiller(detector, max_gap=2, extended_gap=4)
+
+        seq = [
+            [(100, 100, 130, 120)],
+            [], [], [], [], [],  # 5 misses > extended_gap=4
+            [(120, 100, 150, 120)],
+        ]
+        results = self._collect(filler, seq)
+        assert len(results) == 7
+        for i in range(1, 6):
+            assert results[i][0] == []
+
+    def test_no_hallucination_without_prior_detection(self):
+        """No interpolation if there was never a detection."""
+        from trailvideocut.editor.plate_blur import PlateGapFiller, PlateShapeDetector
+
+        detector = MagicMock(spec=PlateShapeDetector)
+        filler = PlateGapFiller(detector, max_gap=3)
+
+        results = self._collect(filler, [[], [], [], []])
+        assert len(results) == 4
+        for p, is_interp in results:
+            assert p == []
+            assert is_interp is False
+
+    def test_trailing_gap_carries_forward(self):
+        """At end of video, trailing gap frames carry forward last detection."""
+        from trailvideocut.editor.plate_blur import PlateGapFiller, PlateShapeDetector
+
+        detector = MagicMock(spec=PlateShapeDetector)
+        filler = PlateGapFiller(detector, max_gap=3)
+
+        seq = [
+            [(100, 100, 130, 120)],
+            [],  # trailing gap
+            [],  # trailing gap
+        ]
+        results = self._collect(filler, seq)
+        assert len(results) == 3
+        assert results[0][1] is False
+        # Trailing frames carry forward (marked as interpolated)
+        assert results[1][0] == [(100, 100, 130, 120)]
+        assert results[1][1] is True
+        assert results[2][0] == [(100, 100, 130, 120)]
+        assert results[2][1] is True
+
+    def test_isolated_detection_overwritten_by_interpolation(self):
+        """A false positive mid-gap is overwritten by gap interpolation."""
+        from trailvideocut.editor.plate_blur import PlateGapFiller, PlateShapeDetector
+
+        detector = MagicMock(spec=PlateShapeDetector)
+        filler = PlateGapFiller(detector, max_gap=3, max_distance=100)
+
+        seq = [
+            [(100, 100, 130, 120)],   # frame 0: real
+            [(100, 100, 130, 120)],   # frame 1: real
+            [],                        # frame 2: gap (incoherent det at frame 3 keeps gap open)
+            [(900, 900, 930, 920)],   # frame 3: false positive (incoherent, treated as gap)
+            [],                        # frame 4: gap
+            [(105, 105, 135, 125)],   # frame 5: real (coherent with frame 1 — closes gap)
+            [(107, 106, 137, 126)],   # frame 6: real
+        ]
+        results = self._collect(filler, seq)
+        assert len(results) == 7
+        # Frames 2-4 are interpolated between frame 1 and 5 (false positive overwritten)
+        assert results[2][1] is True
+        assert results[3][1] is True  # false positive replaced with interpolation
+        assert results[4][1] is True
+        # Interpolated positions progress smoothly
+        assert results[2][0][0][0] == 101  # x1 at t=1/4
+        assert results[3][0][0][0] == 102  # x1 at t=2/4
+        assert results[4][0][0][0] == 103  # x1 at t=3/4
+
+    def test_coherent_detections_kept(self):
+        """Consecutive detections at nearby positions are not filtered."""
+        from trailvideocut.editor.plate_blur import PlateGapFiller, PlateShapeDetector
+
+        detector = MagicMock(spec=PlateShapeDetector)
+        filler = PlateGapFiller(detector, max_gap=3, max_distance=100)
+
+        seq = [
+            [(100, 100, 130, 120)],
+            [(103, 101, 133, 121)],
+            [(106, 102, 136, 122)],
+        ]
+        results = self._collect(filler, seq)
+        assert len(results) == 3
+        for p, _ in results:
+            assert len(p) == 1  # all kept
