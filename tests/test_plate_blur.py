@@ -7,6 +7,125 @@ import cv2
 import numpy as np
 
 
+def _make_plate_roi(
+    width: int = 150,
+    height: int = 40,
+    bg_value: int = 240,
+    char_value: int = 30,
+    num_chars: int = 6,
+) -> np.ndarray:
+    """Create a synthetic grayscale plate-like ROI with evenly-spaced dark marks."""
+    roi = np.full((height, width), bg_value, dtype=np.uint8)
+    char_h = int(height * 0.55)
+    char_w = max(2, int(width * 0.08))
+    y_start = (height - char_h) // 2
+    margin = int(width * 0.10)
+    spacing = (width - 2 * margin) / max(num_chars, 1)
+    for i in range(num_chars):
+        x = int(margin + i * spacing)
+        roi[y_start : y_start + char_h, x : x + char_w] = char_value
+    return roi
+
+
+class TestCharacterGridValidator:
+    """Tests for CharacterGridValidator."""
+
+    def test_accepts_plate_like_roi(self):
+        """White ROI with 6 evenly-spaced dark rectangles is accepted."""
+        from trailvideocut.editor.plate_blur import CharacterGridValidator
+
+        validator = CharacterGridValidator()
+        roi = _make_plate_roi(width=150, height=40, num_chars=6)
+        # Embed ROI in a larger grayscale frame
+        gray = np.full((200, 400), 60, dtype=np.uint8)
+        gray[80:120, 100:250] = roi
+        assert validator.has_characters(gray, (100, 80, 250, 120)) is True
+
+    def test_rejects_uniform_white_roi(self):
+        """Plain white ROI with no internal contours is rejected."""
+        from trailvideocut.editor.plate_blur import CharacterGridValidator
+
+        validator = CharacterGridValidator()
+        gray = np.full((200, 400), 60, dtype=np.uint8)
+        gray[80:120, 100:250] = 240  # uniform white
+        assert validator.has_characters(gray, (100, 80, 250, 120)) is False
+
+    def test_rejects_single_blob(self):
+        """One large dark blob (not multiple characters) is rejected."""
+        from trailvideocut.editor.plate_blur import CharacterGridValidator
+
+        validator = CharacterGridValidator()
+        gray = np.full((200, 400), 60, dtype=np.uint8)
+        gray[80:120, 100:250] = 240
+        # Single large dark blob
+        gray[85:115, 140:210] = 30
+        assert validator.has_characters(gray, (100, 80, 250, 120)) is False
+
+    def test_rejects_random_noise(self):
+        """Tiny scattered speckles are filtered out by size threshold."""
+        from trailvideocut.editor.plate_blur import CharacterGridValidator
+
+        validator = CharacterGridValidator()
+        gray = np.full((200, 400), 240, dtype=np.uint8)
+        # Scatter single dark pixels
+        rng = np.random.RandomState(42)
+        for _ in range(50):
+            y = rng.randint(80, 120)
+            x = rng.randint(100, 250)
+            gray[y, x] = 30
+        assert validator.has_characters(gray, (100, 80, 250, 120)) is False
+
+    def test_rejects_vertically_scattered_blobs(self):
+        """Correct-size blobs at random y-positions fail alignment check."""
+        from trailvideocut.editor.plate_blur import CharacterGridValidator
+
+        validator = CharacterGridValidator()
+        # Use a taller ROI so vertical scatter is more pronounced
+        gray = np.full((300, 400), 240, dtype=np.uint8)
+        # 5 blobs scattered across full height of a 120px tall ROI
+        y_positions = [82, 112, 152, 182, 92]
+        for i, y in enumerate(y_positions):
+            x = 110 + i * 25
+            gray[y : y + 12, x : x + 6] = 30
+        assert validator.has_characters(gray, (100, 80, 250, 200)) is False
+
+    def test_rejects_inconsistent_heights(self):
+        """Aligned blobs with wildly varying heights fail consistency check."""
+        from trailvideocut.editor.plate_blur import CharacterGridValidator
+
+        validator = CharacterGridValidator()
+        gray = np.full((200, 400), 240, dtype=np.uint8)
+        # 5 blobs at same y-center but very different heights
+        heights = [4, 20, 6, 25, 3]
+        for i, h in enumerate(heights):
+            x = 110 + i * 25
+            y = 100 - h // 2
+            gray[y : y + h, x : x + 6] = 30
+        assert validator.has_characters(gray, (100, 80, 250, 120)) is False
+
+    def test_custom_min_char_count(self):
+        """Configurable min_char_count threshold works."""
+        from trailvideocut.editor.plate_blur import CharacterGridValidator
+
+        roi = _make_plate_roi(width=150, height=40, num_chars=4)
+        gray = np.full((200, 400), 60, dtype=np.uint8)
+        gray[80:120, 100:250] = roi
+
+        strict = CharacterGridValidator(min_char_count=5)
+        assert strict.has_characters(gray, (100, 80, 250, 120)) is False
+
+        lenient = CharacterGridValidator(min_char_count=3)
+        assert lenient.has_characters(gray, (100, 80, 250, 120)) is True
+
+    def test_small_roi_returns_false(self):
+        """Very small ROI returns False without crashing."""
+        from trailvideocut.editor.plate_blur import CharacterGridValidator
+
+        validator = CharacterGridValidator()
+        gray = np.full((100, 100), 200, dtype=np.uint8)
+        assert validator.has_characters(gray, (10, 10, 20, 18)) is False
+
+
 class TestBlurRegion:
     """Tests for PlateBlurrer.blur_region."""
 
@@ -59,11 +178,14 @@ class TestPlateShapeDetector:
         detector = PlateShapeDetector()
         # Dark frame with a white rectangle matching current aspect filter
         frame = np.full((400, 800, 3), 60, dtype=np.uint8)
-        # 30x22 white rect → aspect ~1.4 (within 1.2-1.5 filter)
-        frame[180:202, 380:410] = 240
-        # Dark text marks for contrast
-        frame[185:197, 388:394] = 30
-        frame[185:197, 398:404] = 30
+        # 38x26 white rect → aspect ~1.46 (within 1.2-1.6 filter)
+        frame[180:206, 378:416] = 240
+        # 5 dark character marks for contrast + character validation
+        frame[184:198, 382:384] = 30
+        frame[184:198, 387:389] = 30
+        frame[184:198, 392:394] = 30
+        frame[184:198, 397:399] = 30
+        frame[184:198, 402:404] = 30
 
         plates = detector.detect(frame)
         assert len(plates) >= 1
@@ -99,6 +221,107 @@ class TestPlateShapeDetector:
 
         plates = detector.detect(frame)
         assert len(plates) == 0
+
+    def test_detect_rejects_white_rectangle_without_characters(self):
+        """A plain white rectangle with no character marks is rejected."""
+        from trailvideocut.editor.plate_blur import PlateShapeDetector
+
+        detector = PlateShapeDetector()
+        frame = np.full((400, 800, 3), 60, dtype=np.uint8)
+        # White rectangle that passes shape/brightness but has no characters
+        # Use gradient noise to pass contrast check (std >= 15)
+        frame[180:206, 378:416] = 240
+        # Add slight gradient so std > 15 but no character-like contours
+        for col in range(378, 416):
+            frame[180:206, col, :] = min(255, 220 + (col - 378))
+
+        plates = detector.detect(frame)
+        assert len(plates) == 0
+
+    def test_detect_accepts_plate_with_characters(self):
+        """White rectangle with evenly-spaced dark marks is detected."""
+        from trailvideocut.editor.plate_blur import PlateShapeDetector
+
+        detector = PlateShapeDetector()
+        frame = np.full((400, 800, 3), 60, dtype=np.uint8)
+        # 38x26 white rect with 5 character marks
+        frame[180:206, 378:416] = 240
+        frame[184:198, 382:384] = 30
+        frame[184:198, 387:389] = 30
+        frame[184:198, 392:394] = 30
+        frame[184:198, 397:399] = 30
+        frame[184:198, 402:404] = 30
+
+        plates = detector.detect(frame)
+        assert len(plates) >= 1
+
+    def test_detector_accepts_custom_validator(self):
+        """PlateShapeDetector accepts injected validator via DI."""
+        from trailvideocut.editor.plate_blur import PlateShapeDetector
+
+        mock_validator = MagicMock()
+        mock_validator.has_characters.return_value = True
+        detector = PlateShapeDetector(validator=mock_validator)
+
+        frame = np.full((400, 800, 3), 60, dtype=np.uint8)
+        frame[180:206, 378:416] = 240
+        # Add contrast marks so it passes _find_plates
+        frame[184:198, 390:400] = 30
+
+        detector.detect(frame)
+        # Validator was called for each candidate
+        assert mock_validator.has_characters.called
+
+    def test_excludes_detection_in_bottom_center(self):
+        """Plate in the bottom-center exclusion zone is discarded."""
+        from trailvideocut.editor.plate_blur import PlateShapeDetector
+
+        detector = PlateShapeDetector()
+        frame = np.full((400, 800, 3), 60, dtype=np.uint8)
+        # Place plate at bottom center: cy≈355, cx≈400 (both in exclusion zone)
+        frame[342:368, 381:419] = 240
+        frame[348:362, 385:387] = 30
+        frame[348:362, 390:392] = 30
+        frame[348:362, 395:397] = 30
+        frame[348:362, 400:402] = 30
+        frame[348:362, 405:407] = 30
+
+        plates = detector.detect(frame)
+        assert len(plates) == 0
+
+    def test_keeps_detection_in_bottom_left(self):
+        """Plate in bottom-left (outside horizontal middle third) is kept."""
+        from trailvideocut.editor.plate_blur import PlateShapeDetector
+
+        detector = PlateShapeDetector()
+        frame = np.full((400, 800, 3), 60, dtype=np.uint8)
+        # Place plate at bottom left: cy≈355, cx≈100 (left of middle third)
+        frame[342:368, 81:119] = 240
+        frame[348:362, 85:87] = 30
+        frame[348:362, 90:92] = 30
+        frame[348:362, 95:97] = 30
+        frame[348:362, 100:102] = 30
+        frame[348:362, 105:107] = 30
+
+        plates = detector.detect(frame)
+        assert len(plates) >= 1
+
+    def test_keeps_detection_in_top_center(self):
+        """Plate in top-center (outside bottom 15%) is kept."""
+        from trailvideocut.editor.plate_blur import PlateShapeDetector
+
+        detector = PlateShapeDetector()
+        frame = np.full((400, 800, 3), 60, dtype=np.uint8)
+        # Place plate at top center: cy≈50, cx≈400
+        frame[37:63, 381:419] = 240
+        frame[43:57, 385:387] = 30
+        frame[43:57, 390:392] = 30
+        frame[43:57, 395:397] = 30
+        frame[43:57, 400:402] = 30
+        frame[43:57, 405:407] = 30
+
+        plates = detector.detect(frame)
+        assert len(plates) >= 1
 
 
 class TestBlurPlatesPipeline:

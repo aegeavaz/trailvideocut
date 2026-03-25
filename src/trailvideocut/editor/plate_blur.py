@@ -16,12 +16,111 @@ from trailvideocut.editor.assembler import _require_ffmpeg
 console = Console()
 
 
+class CharacterGridValidator:
+    """Validate that a candidate plate region contains character-like contours.
+
+    Uses adaptive thresholding to find dark-on-light character shapes, then
+    checks count, size consistency, and horizontal alignment.
+    """
+
+    def __init__(
+        self,
+        min_char_count: int = 3,
+        max_char_count: int = 10,
+        min_char_height_ratio: float = 0.20,
+        max_char_height_ratio: float = 0.85,
+        min_char_width_ratio: float = 0.02,
+        max_char_width_ratio: float = 0.25,
+        alignment_tolerance: float = 0.35,
+        height_consistency: float = 0.5,
+    ):
+        self._min_chars = min_char_count
+        self._max_chars = max_char_count
+        self._min_h_ratio = min_char_height_ratio
+        self._max_h_ratio = max_char_height_ratio
+        self._min_w_ratio = min_char_width_ratio
+        self._max_w_ratio = max_char_width_ratio
+        self._align_tol = alignment_tolerance
+        self._h_consist = height_consistency
+
+    def has_characters(
+        self, gray: np.ndarray, bbox: tuple[int, int, int, int],
+    ) -> bool:
+        """Return True if the ROI at bbox contains a character-like pattern."""
+        x1, y1, x2, y2 = bbox
+        roi = gray[y1:y2, x1:x2]
+        roi_h, roi_w = roi.shape[:2]
+        if roi_h < 8 or roi_w < 15:
+            return False
+
+        char_bboxes = self._extract_character_contours(roi)
+        return self._validate_character_set(char_bboxes, roi_h, roi_w)
+
+    def _extract_character_contours(
+        self, roi_gray: np.ndarray,
+    ) -> list[tuple[int, int, int, int]]:
+        """Find contours that could be individual characters in the ROI."""
+        roi_h, roi_w = roi_gray.shape[:2]
+        block = min(15, roi_w | 1, roi_h | 1)  # must be odd and <= dimensions
+        if block < 3:
+            return []
+        binary = cv2.adaptiveThreshold(
+            roi_gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY_INV, blockSize=block, C=10,
+        )
+        contours, _ = cv2.findContours(
+            binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
+        )
+        result = []
+        for cnt in contours:
+            x, y, w, h = cv2.boundingRect(cnt)
+            if w * h < 15:
+                continue
+            h_ratio = h / roi_h
+            w_ratio = w / roi_w
+            if not (self._min_h_ratio <= h_ratio <= self._max_h_ratio):
+                continue
+            if not (self._min_w_ratio <= w_ratio <= self._max_w_ratio):
+                continue
+            result.append((x, y, w, h))
+        return result
+
+    def _validate_character_set(
+        self,
+        char_bboxes: list[tuple[int, int, int, int]],
+        roi_h: int,
+        roi_w: int,
+    ) -> bool:
+        """Check count, size consistency, and horizontal alignment."""
+        n = len(char_bboxes)
+        if n < self._min_chars or n > self._max_chars:
+            return False
+
+        heights = np.array([h for _, _, _, h in char_bboxes], dtype=float)
+        mean_h = float(np.mean(heights))
+        if mean_h == 0:
+            return False
+        if float(np.std(heights)) / mean_h > self._h_consist:
+            return False
+
+        centers_y = np.array([y + h / 2 for _, y, _, h in char_bboxes], dtype=float)
+        if float(np.std(centers_y)) / roi_h > self._align_tol:
+            return False
+
+        return True
+
+
 class PlateShapeDetector:
     """Detect license plates by finding white rectangular regions.
 
     Pure OpenCV approach — no neural network. European plates are bright
     white rectangles that stand out against outdoor trail footage.
+    Candidates are validated for character-like sub-contours to reduce
+    false positives.
     """
+
+    def __init__(self, validator: CharacterGridValidator | None = None):
+        self._validator = validator or CharacterGridValidator()
 
     def detect(
         self, frame: np.ndarray,
@@ -30,6 +129,7 @@ class PlateShapeDetector:
 
         Global threshold to find white pixels, morphological closing to fill
         text gaps, then filter contours by aspect ratio, brightness, and contrast.
+        Surviving candidates are validated for character-like content.
         """
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         fh, fw = frame.shape[:2]
@@ -40,7 +140,25 @@ class PlateShapeDetector:
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 3))
         closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
 
-        return self._find_plates(closed, gray, fh, fw, 1.2, 1.6, 300, 180)
+        candidates = self._find_plates(closed, gray, fh, fw, 1.2, 1.6, 300, 180)
+        candidates = [c for c in candidates if not self._in_excluded_zone(c, fh, fw)]
+        return [c for c in candidates if self._validator.has_characters(gray, c)]
+
+    @staticmethod
+    def _in_excluded_zone(
+        bbox: tuple[int, int, int, int], fh: int, fw: int,
+    ) -> bool:
+        """Return True if bbox center falls in the bottom-center exclusion zone.
+
+        Discards detections in the horizontal middle third AND bottom 20% of
+        the frame — the region where the rider's own dashboard appears.
+        """
+        x1, y1, x2, y2 = bbox
+        cx = (x1 + x2) / 2
+        cy = (y1 + y2) / 2
+        in_middle_third_x = fw / 3 <= cx <= 2 * fw / 3
+        in_bottom_20_y = cy >= fh * 0.80
+        return in_middle_third_x and in_bottom_20_y
 
     @staticmethod
     def _find_plates(
@@ -302,6 +420,6 @@ def run_detection_debug(video_path: str, output_dir: Path) -> None:
     (output_dir / "summary.txt").write_text("\n".join(summary_lines) + "\n")
     console.print(
         f"  Done: {frame_idx} frames, "
-        f"{sum(1 for l in summary_lines if '0 plates' not in l)} with detections"
+        f"{sum(1 for line in summary_lines if '0 plates' not in line)} with detections"
     )
     console.print(f"  Output: {output_dir}")
