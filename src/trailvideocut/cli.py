@@ -193,3 +193,221 @@ def launch_ui():
         )
         raise typer.Exit(code=1)
     launch()
+
+
+@app.command(name="detect-plates")
+def detect_plates(
+    video: Path = typer.Argument(..., help="Path to the input video file", exists=True),
+    output_dir: Path = typer.Option(
+        Path("plate_debug"), "-o", "--output-dir", help="Output directory for debug artifacts"
+    ),
+    start: float = typer.Option(0.0, "--start", help="Start time in seconds"),
+    end: float = typer.Option(0.0, "--end", help="End time in seconds (0 = end of video)"),
+    threshold: float = typer.Option(0.1, "--threshold", help="Minimum detection confidence"),
+    every_n: int = typer.Option(1, "--every-n", help="Process every Nth frame (1 = all frames)"),
+    model: Optional[Path] = typer.Option(
+        None, "--model", help="Custom ONNX model path (overrides default model)"
+    ),
+    tiled: bool = typer.Option(
+        True, "--tiled/--no-tiled", help="Use tiled detection for small plates (default: tiled)"
+    ),
+    exclude_phones: bool = typer.Option(
+        True, "--exclude-phones/--no-exclude-phones",
+        help="Auto-detect phones/GPS devices and exclude from plate results",
+    ),
+    continuity_filter: bool = typer.Option(
+        True, "--continuity-filter/--no-continuity-filter",
+        help="Remove sporadic detections lacking temporal continuity",
+    ),
+):
+    """Run plate detection on a video and save debug output (annotated frames + CSV log)."""
+    import csv
+
+    import cv2
+    from rich.progress import Progress
+
+    from trailvideocut.plate.model_manager import download_model, get_model_path
+
+    console.print("[bold]Plate Detection Debug[/]")
+    console.print(f"  Video: {video}")
+    console.print(f"  Output: {output_dir}")
+    console.print(f"  Threshold: {threshold}")
+    if start > 0 or end > 0:
+        console.print(f"  Range: {start}s - {'end' if end == 0 else f'{end}s'}")
+    if every_n > 1:
+        console.print(f"  Sampling: every {every_n} frames")
+    console.print()
+
+    # Resolve model: custom path > cached > download
+    if model:
+        model_path = model
+        console.print(f"  Model: {model_path} (custom)")
+    else:
+        model_path = get_model_path()
+    if model_path is None:
+        console.print("[yellow]Downloading plate detection model...[/]")
+        try:
+            with Progress() as progress:
+                task = progress.add_task("Downloading model...", total=None)
+
+                def _dl_progress(downloaded: int, total: int) -> None:
+                    if total > 0:
+                        progress.update(task, total=total, completed=downloaded)
+
+                model_path = download_model(progress_callback=_dl_progress)
+            console.print(f"[green]Model downloaded:[/] {model_path}\n")
+        except Exception as e:
+            console.print(f"[bold red]Download failed:[/] {e}")
+            raise typer.Exit(code=1)
+
+    # Open video
+    cap = cv2.VideoCapture(str(video))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    total_video_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    start_frame = int(start * fps)
+    end_frame = int(end * fps) if end > 0 else total_video_frames
+    end_frame = min(end_frame, total_video_frames)
+
+    console.print(f"  Video: {width}x{height} @ {fps:.1f} fps, {total_video_frames} frames")
+    console.print(f"  Processing frames {start_frame} - {end_frame} "
+                  f"(every {every_n})\n")
+
+    # Clean and create output dir
+    import shutil
+
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+    output_dir.mkdir(parents=True)
+
+    # Init detector
+    from trailvideocut.plate.detector import PlateDetector
+
+    detector = PlateDetector(
+        str(model_path),
+        confidence_threshold=threshold,
+        exclude_phones=exclude_phones,
+    )
+
+    if detector._has_cuda:
+        console.print(f"  [green]GPU: CUDA active ({detector.backend})[/]")
+    else:
+        console.print(f"  [yellow]GPU: not available — {detector.backend} (CPU)[/]")
+    if exclude_phones:
+        console.print("  [cyan]Phone exclusion: enabled[/]")
+    console.print()
+
+    # --- Pass 1: Detect and accumulate ---
+    from trailvideocut.plate.models import ClipPlateData
+
+    frames_to_process = list(range(start_frame, end_frame, every_n))
+    clip_data = ClipPlateData(clip_index=0)
+
+    with Progress() as progress:
+        task = progress.add_task("Detecting plates...", total=len(frames_to_process))
+
+        for frame_num in frames_to_process:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            if tiled:
+                boxes = detector.detect_frame_tiled(frame)
+            else:
+                boxes = detector.detect_frame(frame)
+
+            if boxes:
+                clip_data.detections[frame_num] = boxes
+
+            progress.update(task, advance=1)
+
+    cap.release()
+
+    raw_count = sum(len(b) for b in clip_data.detections.values())
+
+    # --- Temporal continuity filter ---
+    if continuity_filter:
+        from trailvideocut.plate.temporal_filter import filter_temporal_continuity
+
+        clip_data = filter_temporal_continuity(
+            clip_data,
+            max_frame_gap=max(1, every_n),
+        )
+        filtered_count = sum(len(b) for b in clip_data.detections.values())
+        console.print(
+            f"  Temporal filter: {raw_count} -> {filtered_count} detections"
+        )
+
+    # --- Pass 2: Annotate frames and write CSV ---
+    csv_path = output_dir / "detections.csv"
+    csv_file = open(csv_path, "w", newline="")
+    writer = csv.writer(csv_file)
+    writer.writerow([
+        "frame_number", "timestamp_s",
+        "x", "y", "w", "h",
+        "x_px", "y_px", "w_px", "h_px",
+        "confidence",
+    ])
+
+    total_detections = 0
+    frames_with_boxes = sorted(clip_data.detections.keys())
+
+    if frames_with_boxes:
+        cap = cv2.VideoCapture(str(video))
+
+        with Progress() as progress:
+            task = progress.add_task("Writing frames...", total=len(frames_with_boxes))
+
+            for frame_num in frames_with_boxes:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+                ret, frame = cap.read()
+                if not ret:
+                    break
+
+                for box in clip_data.detections[frame_num]:
+                    x_px = int(box.x * width)
+                    y_px = int(box.y * height)
+                    w_px = int(box.w * width)
+                    h_px = int(box.h * height)
+
+                    cv2.rectangle(
+                        frame,
+                        (x_px, y_px),
+                        (x_px + w_px, y_px + h_px),
+                        (0, 200, 255),  # orange BGR
+                        2,
+                    )
+                    label = f"{box.confidence:.0%}"
+                    cv2.putText(
+                        frame, label,
+                        (x_px, y_px - 6),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2,
+                    )
+
+                    timestamp = frame_num / fps
+                    writer.writerow([
+                        frame_num, f"{timestamp:.3f}",
+                        f"{box.x:.6f}", f"{box.y:.6f}", f"{box.w:.6f}", f"{box.h:.6f}",
+                        x_px, y_px, w_px, h_px,
+                        f"{box.confidence:.6f}",
+                    ])
+                    total_detections += 1
+
+                png_path = output_dir / f"frame_{frame_num:06d}.png"
+                cv2.imwrite(str(png_path), frame)
+
+                progress.update(task, advance=1)
+
+        cap.release()
+
+    csv_file.close()
+
+    console.print(
+        f"\n[bold green]Done![/] Processed {len(frames_to_process)} frames, "
+        f"found {total_detections} plate detections."
+    )
+    console.print(f"  Frames: {output_dir}/frame_*.png")
+    console.print(f"  Log:    {csv_path}")

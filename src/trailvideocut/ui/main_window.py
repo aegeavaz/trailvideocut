@@ -160,24 +160,17 @@ class MainWindow(QMainWindow):
 
     # --- Export navigation ---
 
-    def _go_to_export(self, render_settings: dict):
+    def _go_to_export(self):
         if self._config is None or self._cut_plan is None:
             return
-
-        transition_str = render_settings.get("transition_style", "crossfade")
-        self._config.transition_style = TransitionStyle(transition_str)
-        self._config.crossfade_duration = render_settings.get("crossfade_duration", 0.2)
-        self._config.output_preset = render_settings.get("output_preset", "veryslow")
-        self._config.output_fps = render_settings.get("output_fps", 0)
-        self._config.output_threads = render_settings.get("output_threads", 0)
 
         edited_clips = self._review_page.get_current_clips()
         self._cut_plan = CutPlan(
             decisions=edited_clips,
             total_duration=self._cut_plan.total_duration,
             song_tempo=self._cut_plan.song_tempo,
-            transition_style=self._config.transition_style.value,
-            crossfade_duration=self._config.crossfade_duration,
+            transition_style=self._cut_plan.transition_style,
+            crossfade_duration=self._cut_plan.crossfade_duration,
             clips_selected=self._cut_plan.clips_selected,
             score_cv=self._cut_plan.score_cv,
         )
@@ -190,6 +183,26 @@ class MainWindow(QMainWindow):
     def _start_export(self, output_path: str, is_davinci: bool):
         if self._config is None or self._cut_plan is None:
             return
+
+        # Read render settings from export page
+        render_settings = self._export_page.get_render_settings()
+        transition_str = render_settings.get("transition_style", "crossfade")
+        self._config.transition_style = TransitionStyle(transition_str)
+        self._config.crossfade_duration = render_settings.get("crossfade_duration", 0.2)
+        self._config.output_preset = render_settings.get("output_preset", "veryslow")
+        self._config.output_fps = render_settings.get("output_fps", 0)
+        self._config.output_threads = render_settings.get("output_threads", 0)
+
+        # Rebuild cut plan with final transition settings
+        self._cut_plan = CutPlan(
+            decisions=self._cut_plan.decisions,
+            total_duration=self._cut_plan.total_duration,
+            song_tempo=self._cut_plan.song_tempo,
+            transition_style=self._config.transition_style.value,
+            crossfade_duration=self._config.crossfade_duration,
+            clips_selected=self._cut_plan.clips_selected,
+            score_cv=self._cut_plan.score_cv,
+        )
 
         self._config.davinci = is_davinci
         self._config.output_path = Path(output_path)

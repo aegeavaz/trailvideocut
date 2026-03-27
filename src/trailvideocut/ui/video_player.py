@@ -1,11 +1,13 @@
 from pathlib import Path
 
 import cv2
-from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtCore import QPointF, QRectF, Qt, QUrl, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
-from PySide6.QtMultimediaWidgets import QVideoWidget
+from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 from PySide6.QtWidgets import (
+    QGraphicsScene,
+    QGraphicsView,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -65,11 +67,40 @@ class ClickSlider(QSlider):
         painter.end()
 
 
+class _VideoGraphicsView(QGraphicsView):
+    """QGraphicsView that forwards wheel events to parent and refits on resize."""
+
+    def __init__(self, scene, parent=None):
+        super().__init__(scene, parent)
+        self.setStyleSheet("background-color: #111; border: none;")
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setFocusPolicy(Qt.ClickFocus)
+        self.setMinimumSize(320, 180)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setRenderHint(QPainter.SmoothPixmapTransform)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        parent = self.parent()
+        if hasattr(parent, '_fit_video'):
+            parent._fit_video()
+
+    def wheelEvent(self, event):
+        # Forward all wheel events to parent VideoPlayer
+        parent = self.parent()
+        if parent is not None:
+            parent.wheelEvent(event)
+        else:
+            event.accept()
+
+
 class VideoPlayer(QWidget):
     """QMediaPlayer-based video player with audio support."""
 
     position_changed = Signal(float)  # current time in seconds
     user_seeked = Signal()
+    zoom_changed = Signal(float)  # emitted with current zoom factor
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -84,6 +115,12 @@ class VideoPlayer(QWidget):
         self._on_transport: callable | None = None
         self._external_control: bool = False
 
+        # Zoom state
+        self._zoom_factor = 1.0
+        self._min_zoom = 1.0
+        self._max_zoom = 5.0
+        self._invert_wheel = False  # when True, plain wheel zooms, Ctrl+wheel seeks
+
         self._player.positionChanged.connect(self._on_position_changed)
         self._player.durationChanged.connect(self._on_duration_changed)
         self._player.playbackStateChanged.connect(self._on_state_changed)
@@ -95,12 +132,25 @@ class VideoPlayer(QWidget):
     # --- public API ---
 
     @property
+    def video_widget(self) -> QGraphicsView:
+        """The underlying video view widget, for overlaying child widgets."""
+        return self._view
+
+    @property
+    def fps(self) -> float:
+        return self._fps
+
+    @property
     def duration(self) -> float:
         return self._duration_ms / 1000.0
 
     @property
     def current_time(self) -> float:
         return self._player.position() / 1000.0
+
+    @property
+    def zoom_factor(self) -> float:
+        return self._zoom_factor
 
     def load_video(self, path: str | Path):
         self.stop()
@@ -110,6 +160,7 @@ class VideoPlayer(QWidget):
         self._fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
         cap.release()
         self._player.setSource(QUrl.fromLocalFile(resolved))
+        self.reset_zoom()
 
     def set_marks(self, timestamps: list[float]):
         self._slider.set_marks(timestamps, self.duration)
@@ -168,6 +219,8 @@ class VideoPlayer(QWidget):
     def update_time_label_external(self, current_s: float, total_s: float):
         """Update time label from external source."""
         self._time_label.setText(f"{self._fmt(current_s)} / {self._fmt(total_s)}")
+        frame = int(current_s * self._fps)
+        self._frame_label.setText(f"F: {frame}")
 
     def restore_slider_range(self):
         """Restore slider range to the loaded video duration."""
@@ -175,20 +228,79 @@ class VideoPlayer(QWidget):
         self._slider.setValue(self._player.position())
         self._update_time_label()
 
+    # --- Zoom / Pan ---
+
+    def set_invert_wheel(self, invert: bool):
+        """When True, plain wheel zooms and Ctrl+wheel seeks (review page mode)."""
+        self._invert_wheel = invert
+
+    def reset_zoom(self):
+        """Reset zoom to 1.0 and refit."""
+        self._zoom_factor = 1.0
+        self._fit_video()
+        self.zoom_changed.emit(self._zoom_factor)
+
+    def _fit_video(self):
+        """Fit the video item in the view, respecting current zoom level."""
+        if self._video_item is None:
+            return
+        rect = self._video_item.boundingRect()
+        if rect.isEmpty():
+            return
+        self._view.resetTransform()
+        self._view.fitInView(self._video_item, Qt.KeepAspectRatio)
+        if self._zoom_factor > 1.0:
+            self._view.scale(self._zoom_factor, self._zoom_factor)
+
+    def pan_video(self, dx: int, dy: int):
+        """Pan the video view by pixel deltas (called by overlay for drag-pan)."""
+        if self._zoom_factor <= 1.0:
+            return
+        hs = self._view.horizontalScrollBar()
+        vs = self._view.verticalScrollBar()
+        hs.setValue(hs.value() - dx)
+        vs.setValue(vs.value() - dy)
+        self.zoom_changed.emit(self._zoom_factor)
+
+    def get_effective_video_rect(self) -> QRectF:
+        """Return the video item's bounding rect mapped to view viewport coordinates.
+
+        Tells callers where the video frame pixels appear within the view widget.
+        At zoom=1, this is the fitted rect. At zoom>1, parts extend beyond bounds.
+        """
+        if self._video_item is None:
+            return QRectF()
+        item_rect = self._video_item.boundingRect()
+        if item_rect.isEmpty():
+            return QRectF()
+        tl = self._view.mapFromScene(
+            self._video_item.mapToScene(item_rect.topLeft())
+        )
+        br = self._view.mapFromScene(
+            self._video_item.mapToScene(item_rect.bottomRight())
+        )
+        return QRectF(QPointF(tl), QPointF(br))
+
     # --- UI construction ---
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
+        self.setFocusPolicy(Qt.ClickFocus)
 
-        # Video display — takes all available space
-        self._display = QVideoWidget()
-        self._display.setMinimumSize(320, 180)
-        self._display.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self._display.setStyleSheet("background-color: #111; border-radius: 4px;")
-        self._player.setVideoOutput(self._display)
-        layout.addWidget(self._display, stretch=1)
+        # Video display — QGraphicsView + QGraphicsVideoItem for zoom support
+        self._scene = QGraphicsScene(self)
+        self._video_item = QGraphicsVideoItem()
+        self._scene.addItem(self._video_item)
+
+        self._view = _VideoGraphicsView(self._scene, self)
+        self._player.setVideoOutput(self._video_item)
+
+        # Refit when native video size becomes known
+        self._video_item.nativeSizeChanged.connect(lambda _size: self._fit_video())
+
+        layout.addWidget(self._view, stretch=1)
 
         # Slider (operates in milliseconds)
         self._slider = ClickSlider(Qt.Horizontal)
@@ -255,6 +367,9 @@ class VideoPlayer(QWidget):
         self._time_label = QLabel("00:00.00 / 00:00.00")
         self._time_label.setStyleSheet("font-size: 14px; font-family: monospace; min-width: 170px;")
 
+        self._frame_label = QLabel("F: 0")
+        self._frame_label.setStyleSheet("font-size: 14px; font-family: monospace; min-width: 70px;")
+
         controls.addStretch()
         controls.addWidget(self._btn_start)
         controls.addWidget(self._btn_jump_back)
@@ -265,6 +380,7 @@ class VideoPlayer(QWidget):
         controls.addWidget(self._btn_end)
         controls.addStretch()
         controls.addWidget(self._time_label)
+        controls.addWidget(self._frame_label)
 
         layout.addLayout(controls)
 
@@ -372,6 +488,8 @@ class VideoPlayer(QWidget):
         self._time_label.setText(
             f"{self._fmt(self.current_time)} / {self._fmt(self.duration)}"
         )
+        frame = int(self._player.position() / 1000.0 * self._fps)
+        self._frame_label.setText(f"F: {frame}")
 
     @staticmethod
     def _fmt(seconds: float) -> str:
@@ -379,6 +497,25 @@ class VideoPlayer(QWidget):
         return f"{int(m):02d}:{s:05.2f}"
 
     def wheelEvent(self, event):
+        has_ctrl = bool(event.modifiers() & Qt.ControlModifier)
+        # In review page mode (_invert_wheel), plain wheel zooms and Ctrl+wheel seeks.
+        # In setup page mode (default), Ctrl+wheel zooms and plain wheel seeks.
+        want_zoom = has_ctrl if not self._invert_wheel else not has_ctrl
+
+        if want_zoom:
+            delta = event.angleDelta().y()
+            factor = 1.15 if delta > 0 else 1.0 / 1.15
+            new_zoom = self._zoom_factor * factor
+            new_zoom = max(self._min_zoom, min(self._max_zoom, new_zoom))
+            if abs(new_zoom - 1.0) < 0.05:
+                new_zoom = 1.0
+            self._zoom_factor = new_zoom
+            self._fit_video()
+            self.zoom_changed.emit(self._zoom_factor)
+            event.accept()
+            return
+
+        # Seek ±1 s per notch
         delta = event.angleDelta().y()  # typically ±120 per notch
         step_ms = int(delta / 120 * 1000)  # 1 s per notch
         if self._on_transport:

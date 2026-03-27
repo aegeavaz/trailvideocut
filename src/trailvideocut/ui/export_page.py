@@ -2,7 +2,10 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QComboBox,
+    QDoubleSpinBox,
     QFileDialog,
+    QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -10,6 +13,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QRadioButton,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -57,6 +61,46 @@ class ExportPage(QWidget):
         self._radio_davinci.toggled.connect(lambda: self._update_output_for_format())
 
         root.addWidget(format_group)
+
+        # Render settings
+        render_group = QGroupBox("Render Settings")
+        render_layout = QFormLayout(render_group)
+
+        self._transition = QComboBox()
+        self._transition.addItems(["crossfade", "hard_cut"])
+        self._transition.setToolTip("Transition style between clips. Crossfade blends clips; hard_cut is instant.")
+        render_layout.addRow("Transition:", self._transition)
+
+        self._crossfade_dur = QDoubleSpinBox()
+        self._crossfade_dur.setRange(0.0, 2.0)
+        self._crossfade_dur.setValue(0.2)
+        self._crossfade_dur.setSingleStep(0.05)
+        self._crossfade_dur.setToolTip("Duration of crossfade transition in seconds between consecutive clips.")
+        render_layout.addRow("Crossfade (s):", self._crossfade_dur)
+
+        self._preset = QComboBox()
+        self._preset.addItems(["ultrafast", "superfast", "veryfast", "faster",
+                               "fast", "medium", "slow", "slower", "veryslow"])
+        self._preset.setCurrentText("veryslow")
+        self._preset.setToolTip("FFmpeg encoding speed preset. Slower presets produce better quality at the same file size.")
+        render_layout.addRow("Preset:", self._preset)
+
+        self._output_fps = QDoubleSpinBox()
+        self._output_fps.setRange(0, 120.0)
+        self._output_fps.setValue(0)
+        self._output_fps.setSingleStep(1.0)
+        self._output_fps.setSpecialValueText("auto (source)")
+        self._output_fps.setToolTip("Output frame rate. 0 = use the source video's original frame rate.")
+        render_layout.addRow("FPS:", self._output_fps)
+
+        self._threads = QSpinBox()
+        self._threads.setRange(0, 64)
+        self._threads.setValue(0)
+        self._threads.setSpecialValueText("auto")
+        self._threads.setToolTip("Number of encoding threads. 0 = auto-detect based on CPU cores.")
+        render_layout.addRow("Threads:", self._threads)
+
+        root.addWidget(render_group)
 
         # Output path
         output_group = QGroupBox("Output")
@@ -162,6 +206,16 @@ class ExportPage(QWidget):
         self._btn_start.setEnabled(True)
         self._status_label.setText(f"Error: {message}")
         self._status_label.setStyleSheet("color: #f44336; padding: 4px;")
+
+    def get_render_settings(self) -> dict:
+        """Return current render settings as a dict."""
+        return {
+            "transition_style": self._transition.currentText(),
+            "crossfade_duration": self._crossfade_dur.value(),
+            "output_preset": self._preset.currentText(),
+            "output_fps": self._output_fps.value(),
+            "output_threads": self._threads.value(),
+        }
 
     def reset_status(self):
         self._status_label.setText("")

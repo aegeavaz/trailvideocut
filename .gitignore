@@ -22,3 +22,5 @@ output*
 .coverage
 htmlcov/
 *.exe
+*.pt
+.claude

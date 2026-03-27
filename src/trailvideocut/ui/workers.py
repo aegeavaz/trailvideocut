@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 
@@ -153,5 +156,99 @@ class RenderWorker(QThread):
                 assembler = VideoAssembler(self._config, progress_callback=_progress_cb)
                 assembler.assemble(self._cut_plan)
                 self.finished.emit(str(self._config.output_path))
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class PlateDetectionWorker(QThread):
+    """Runs plate detection on one or more clips in a background thread."""
+
+    progress = Signal(int, int, int)  # clip_index, frame, total_frames
+    finished = Signal(object)  # {clip_index: ClipPlateData}
+    error = Signal(str)
+
+    def __init__(
+        self,
+        video_path: str | Path,
+        clips: list[tuple[int, float, float]],  # [(clip_index, start, end), ...]
+        model_path: str | Path,
+        confidence_threshold: float = 0.25,
+        tiled: bool = True,
+        exclude_phones: bool = False,
+        debug: bool = False,
+        min_ratio: float = 1.2,
+        max_ratio: float = 2.0,
+        min_plate_px_w: int = 15,
+        min_plate_px_h: int = 10,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self._video_path = str(video_path)
+        self._clips = clips
+        self._model_path = str(model_path)
+        self._threshold = confidence_threshold
+        self._tiled = tiled
+        self._exclude_phones = exclude_phones
+        self._debug = debug
+        self._min_ratio = min_ratio
+        self._max_ratio = max_ratio
+        self._min_plate_px_w = min_plate_px_w
+        self._min_plate_px_h = min_plate_px_h
+        self._cancelled = False
+
+    def stop(self):
+        self._cancelled = True
+
+    def run(self):
+        try:
+            from trailvideocut.plate.detector import PlateDetector
+
+            detector = PlateDetector(
+                self._model_path, self._threshold,
+                exclude_phones=self._exclude_phones,
+                verbose=self._debug,
+                min_ratio=self._min_ratio,
+                max_ratio=self._max_ratio,
+                min_plate_px_w=self._min_plate_px_w,
+                min_plate_px_h=self._min_plate_px_h,
+            )
+            results: dict = {}
+
+            for clip_index, start, end in self._clips:
+                if self._cancelled:
+                    break
+
+                def _progress(frames_done: int, total: int) -> None:
+                    self.progress.emit(clip_index, frames_done, total)
+
+                data = detector.detect_clip(
+                    self._video_path, start, end,
+                    clip_index=clip_index,
+                    progress_callback=_progress,
+                    cancelled=lambda: self._cancelled,
+                    tiled=self._tiled,
+                )
+                results[clip_index] = data
+
+            self.finished.emit(results)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class ModelDownloadWorker(QThread):
+    """Downloads the plate detection ONNX model with progress reporting."""
+
+    progress = Signal(int, int)  # bytes_downloaded, total_bytes
+    finished = Signal(str)  # path to downloaded model
+    error = Signal(str)
+
+    def run(self):
+        try:
+            from trailvideocut.plate.model_manager import download_model
+
+            path = download_model(
+                progress_callback=lambda d, t: self.progress.emit(d, t),
+            )
+            self.finished.emit(str(path))
         except Exception as e:
             self.error.emit(str(e))

@@ -1,17 +1,21 @@
 import bisect
 
-from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtCore import Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
-    QComboBox,
+    QApplication,
+    QCheckBox,
     QDoubleSpinBox,
-    QFormLayout,
     QGroupBox,
+    QSpinBox,
     QHBoxLayout,
     QLabel,
+    QListWidget,
+    QMessageBox,
+    QProgressBar,
+    QProgressDialog,
     QPushButton,
-    QSpinBox,
     QSplitter,
     QSpacerItem,
     QSizePolicy,
@@ -21,6 +25,8 @@ from PySide6.QtWidgets import (
 
 from trailvideocut.audio.models import AudioAnalysis, MusicSection
 from trailvideocut.editor.models import CutPlan, EditDecision
+from trailvideocut.plate.models import ClipPlateData, PlateBox
+from trailvideocut.ui.plate_overlay import PlateOverlayWidget
 from trailvideocut.ui.timeline import TimelineWidget
 from trailvideocut.ui.video_player import VideoPlayer
 
@@ -29,7 +35,7 @@ class ReviewPage(QWidget):
     """Page 2: Timeline review, clip editing, and render settings."""
 
     back_requested = Signal()
-    export_requested = Signal(dict)  # render settings
+    export_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -39,12 +45,19 @@ class ReviewPage(QWidget):
 
         # Preview state
         self._audio_path: str = ""
+        self._video_path: str = ""
         self._previewing: bool = False
         self._preview_clip_index: int = -1
         self._preview_decisions: list[EditDecision] = []
         self._preview_target_starts: list[float] = []
         self._music_player: QMediaPlayer | None = None
         self._music_audio_output: QAudioOutput | None = None
+
+        # Plate detection state
+        self._plate_data: dict[int, ClipPlateData] = {}  # clip_index -> ClipPlateData
+        self._plate_worker = None
+        self._video_dims: tuple[int, int] | None = None  # (width, height)
+        self._plate_list_updating: bool = False  # guard against selection loops
 
         self._build_ui()
 
@@ -60,6 +73,7 @@ class ReviewPage(QWidget):
         self._btn_preview.setEnabled(False)
         self._btn_preview.setToolTip("Enter preview mode to play clips synced with music using player controls")
         self._btn_preview.clicked.connect(self._toggle_preview)
+
         self._btn_export = QPushButton("Export >>")
         self._btn_export.setProperty("primary", True)
         self._btn_export.clicked.connect(self._on_export)
@@ -91,12 +105,25 @@ class ReviewPage(QWidget):
         self._preview_status.setVisible(False)
         timeline_layout.addWidget(self._preview_status)
 
+        timeline_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         root.addWidget(timeline_group)
 
         # --- Main content: video player on top, clip info + settings on bottom ---
         # Video player (stretches to fill available space)
         self._player = VideoPlayer()
+        self._player.set_invert_wheel(True)  # plain wheel zooms, Ctrl+wheel seeks
         root.addWidget(self._player, stretch=1)
+
+        # Plate overlay — top-level frameless window that floats above the
+        # QVideoWidget's native Direct3D surface on Windows.
+        self._plate_overlay = PlateOverlayWidget(self._player)
+        self._plate_overlay.hide()
+        self._plate_overlay.unexpectedly_hidden.connect(
+            self._on_overlay_unexpectedly_hidden,
+        )
+        self._plate_overlay.selection_changed.connect(self._on_plate_selection_changed)
+        self._plate_overlay.box_changed.connect(self._on_plate_selection_changed)
+        self._plate_overlay.add_plate_requested.connect(self._on_add_plate)
 
         # Spacing between player controls and bottom section
         root.addSpacerItem(QSpacerItem(0, 12, QSizePolicy.Minimum, QSizePolicy.Fixed))
@@ -107,10 +134,12 @@ class ReviewPage(QWidget):
         # Clip details with prev/next navigation
         clip_group = QGroupBox("Selected Clip")
         clip_layout = QVBoxLayout(clip_group)
+
         self._clip_info = QLabel("No clip selected")
-        self._clip_info.setWordWrap(True)
-        self._clip_info.setStyleSheet("font-family: monospace; font-size: 12px;")
-        clip_layout.addWidget(self._clip_info)
+        self._clip_info.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self._clip_info.setStyleSheet("font-family: monospace; font-size: 11px;")
+        self._clip_info.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+        clip_layout.addWidget(self._clip_info, stretch=1)
 
         clip_nav = QHBoxLayout()
         self._btn_prev_clip = QPushButton("<< Prev Clip")
@@ -121,48 +150,112 @@ class ReviewPage(QWidget):
         clip_nav.addWidget(self._btn_next_clip)
         clip_layout.addLayout(clip_nav)
 
-        clip_layout.addStretch()
         bottom_splitter.addWidget(clip_group)
 
-        # Render settings
-        render_group = QGroupBox("Render Settings")
-        render_layout = QFormLayout(render_group)
+        # Plate detection settings & info
+        plate_group = QGroupBox("Plate Detection")
+        plate_layout = QVBoxLayout(plate_group)
 
-        self._transition = QComboBox()
-        self._transition.addItems(["crossfade", "hard_cut"])
-        self._transition.setToolTip("Transition style between clips. Crossfade blends clips; hard_cut is instant.")
-        render_layout.addRow("Transition:", self._transition)
+        # Action buttons row
+        btn_row = QHBoxLayout()
+        self._btn_detect_plates = QPushButton("Detect Plates")
+        self._btn_detect_plates.setEnabled(False)
+        self._btn_detect_plates.setToolTip(
+            "Detect license plates in the selected clip, or all clips if none is selected"
+        )
+        self._btn_detect_plates.clicked.connect(self._on_detect_plates)
+        btn_row.addWidget(self._btn_detect_plates)
 
-        self._crossfade_dur = QDoubleSpinBox()
-        self._crossfade_dur.setRange(0.0, 2.0)
-        self._crossfade_dur.setValue(0.2)
-        self._crossfade_dur.setSingleStep(0.05)
-        self._crossfade_dur.setToolTip("Duration of crossfade transition in seconds between consecutive clips.")
-        render_layout.addRow("Crossfade (s):", self._crossfade_dur)
+        self._btn_add_plate = QPushButton("Add Plate")
+        self._btn_add_plate.setEnabled(False)
+        self._btn_add_plate.setToolTip("Add a manual plate box at the current frame")
+        self._btn_add_plate.clicked.connect(self._on_add_plate)
+        btn_row.addWidget(self._btn_add_plate)
 
-        self._preset = QComboBox()
-        self._preset.addItems(["ultrafast", "superfast", "veryfast", "faster",
-                               "fast", "medium", "slow", "slower", "veryslow"])
-        self._preset.setCurrentText("veryslow")
-        self._preset.setToolTip("FFmpeg encoding speed preset. Slower presets produce better quality at the same file size.")
-        render_layout.addRow("Preset:", self._preset)
+        self._chk_show_plates = QCheckBox("Show Plates")
+        self._chk_show_plates.setChecked(True)
+        self._chk_show_plates.setEnabled(False)
+        self._chk_show_plates.toggled.connect(self._on_toggle_plates_visible)
+        btn_row.addWidget(self._chk_show_plates)
 
-        self._output_fps = QDoubleSpinBox()
-        self._output_fps.setRange(0, 120.0)
-        self._output_fps.setValue(0)
-        self._output_fps.setSingleStep(1.0)
-        self._output_fps.setSpecialValueText("auto (source)")
-        self._output_fps.setToolTip("Output frame rate. 0 = use the source video's original frame rate.")
-        render_layout.addRow("FPS:", self._output_fps)
+        plate_layout.addLayout(btn_row)
 
-        self._threads = QSpinBox()
-        self._threads.setRange(0, 64)
-        self._threads.setValue(0)
-        self._threads.setSpecialValueText("auto")
-        self._threads.setToolTip("Number of encoding threads. 0 = auto-detect based on CPU cores.")
-        render_layout.addRow("Threads:", self._threads)
+        # Settings row
+        detect_row = QHBoxLayout()
+        detect_row.addWidget(QLabel("Confidence:"))
+        self._spin_confidence = QDoubleSpinBox()
+        self._spin_confidence.setRange(0.01, 1.0)
+        self._spin_confidence.setValue(0.05)
+        self._spin_confidence.setSingleStep(0.05)
+        self._spin_confidence.setToolTip("Minimum confidence threshold for plate detection")
+        detect_row.addWidget(self._spin_confidence)
 
-        bottom_splitter.addWidget(render_group)
+        self._chk_exclude_phones = QCheckBox("Exclude Phone")
+        self._chk_exclude_phones.setChecked(True)
+        self._chk_exclude_phones.setToolTip("Exclude detected phone/device regions from plate results")
+        detect_row.addWidget(self._chk_exclude_phones)
+
+        self._chk_debug_plates = QCheckBox("Debug")
+        self._chk_debug_plates.setToolTip("Print plate detection debug info to the console")
+        detect_row.addWidget(self._chk_debug_plates)
+
+        plate_layout.addLayout(detect_row)
+
+        # Aspect ratio filter row
+        ratio_row = QHBoxLayout()
+        ratio_row.addWidget(QLabel("Min Ratio:"))
+        self._spin_min_ratio = QDoubleSpinBox()
+        self._spin_min_ratio.setRange(0.5, 5.0)
+        self._spin_min_ratio.setValue(0.5)
+        self._spin_min_ratio.setSingleStep(0.1)
+        self._spin_min_ratio.setToolTip("Minimum width/height aspect ratio for plate geometry filter")
+        ratio_row.addWidget(self._spin_min_ratio)
+
+        ratio_row.addWidget(QLabel("Max Ratio:"))
+        self._spin_max_ratio = QDoubleSpinBox()
+        self._spin_max_ratio.setRange(0.5, 10.0)
+        self._spin_max_ratio.setValue(2.0)
+        self._spin_max_ratio.setSingleStep(0.1)
+        self._spin_max_ratio.setToolTip("Maximum width/height aspect ratio for plate geometry filter")
+        ratio_row.addWidget(self._spin_max_ratio)
+
+        ratio_row.addWidget(QLabel("Min W px:"))
+        self._spin_min_w = QSpinBox()
+        self._spin_min_w.setRange(1, 200)
+        self._spin_min_w.setValue(10)
+        self._spin_min_w.setToolTip("Minimum plate width in pixels")
+        ratio_row.addWidget(self._spin_min_w)
+
+        ratio_row.addWidget(QLabel("Min H px:"))
+        self._spin_min_h = QSpinBox()
+        self._spin_min_h.setRange(1, 200)
+        self._spin_min_h.setValue(5)
+        self._spin_min_h.setToolTip("Minimum plate height in pixels")
+        ratio_row.addWidget(self._spin_min_h)
+        ratio_row.addStretch()
+        plate_layout.addLayout(ratio_row)
+
+        self._plate_list = QListWidget()
+        self._plate_list.setStyleSheet("font-family: monospace; font-size: 11px; color: #ccc;")
+        self._plate_list.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+        self._plate_list.setSelectionMode(QListWidget.SingleSelection)
+        self._plate_list.currentRowChanged.connect(self._on_plate_list_selection_changed)
+        plate_layout.addWidget(self._plate_list, stretch=1)
+
+        # Plate detection progress (always in layout to avoid resize)
+        self._plate_progress_bar = QProgressBar()
+        self._plate_progress_bar.setTextVisible(True)
+        self._plate_progress_bar.setMaximumHeight(20)
+        self._plate_progress_bar.setFormat("")
+        self._plate_progress_bar.setValue(0)
+        self._btn_cancel_detect = QPushButton("Cancel")
+        self._btn_cancel_detect.setEnabled(False)
+        self._btn_cancel_detect.clicked.connect(self._on_cancel_detect)
+        plate_progress_row = QHBoxLayout()
+        plate_progress_row.addWidget(self._plate_progress_bar, stretch=1)
+        plate_progress_row.addWidget(self._btn_cancel_detect)
+        plate_layout.addLayout(plate_progress_row)
+        bottom_splitter.addWidget(plate_group)
         bottom_splitter.setSizes([350, 250])
 
         # Fixed-height bottom section (not resizable vertically)
@@ -172,7 +265,13 @@ class ReviewPage(QWidget):
         # Connect playback cursor, user seek deselection, and clip boundary check
         self._player.position_changed.connect(self._timeline.set_cursor_position)
         self._player.position_changed.connect(self._check_clip_boundary)
+        self._player.position_changed.connect(self._update_plate_overlay_frame)
         self._player.user_seeked.connect(self._on_user_seeked)
+        self._player.zoom_changed.connect(self._on_zoom_changed)
+
+        app = QApplication.instance()
+        if app is not None:
+            app.applicationStateChanged.connect(self._on_app_state_changed)
 
         # Keyboard shortcuts (same as setup page)
         ctx = Qt.WidgetWithChildrenShortcut
@@ -184,6 +283,8 @@ class ReviewPage(QWidget):
         QShortcut(Qt.Key_Home, self, self._player._go_start, context=ctx)
         QShortcut(Qt.Key_End, self, self._player._go_end, context=ctx)
         QShortcut(Qt.Key_Escape, self, self._stop_preview_if_active, context=ctx)
+        QShortcut(Qt.Key_Delete, self, self._plate_overlay.delete_selected, context=ctx)
+        QShortcut(Qt.Key_Backspace, self, self._plate_overlay.delete_selected, context=ctx)
 
     def set_data(
         self,
@@ -197,9 +298,13 @@ class ReviewPage(QWidget):
         self._audio = audio
         self._sections = audio.sections
         self._audio_path = audio_path
+        self._video_path = video_path
 
         # Enable preview button when audio is available
         self._btn_preview.setEnabled(bool(audio_path))
+
+        # Enable plate detection button when clips are available
+        self._btn_detect_plates.setEnabled(bool(cut_plan.decisions))
 
         # Summary
         self._summary.setText(
@@ -533,14 +638,28 @@ class ReviewPage(QWidget):
                 section_energy = sec.energy
                 break
 
+        # Plate detection info
+        plate_info = ""
+        if index in self._plate_data:
+            pd = self._plate_data[index]
+            frames_with_plates = len(pd.detections)
+            total_boxes = sum(len(boxes) for boxes in pd.detections.values())
+            manual_boxes = sum(
+                1 for boxes in pd.detections.values() for b in boxes if b.manual
+            )
+            plate_info = f"  Plates: {total_boxes} in {frames_with_plates}f"
+            if manual_boxes:
+                plate_info += f" ({manual_boxes}m)"
+
         self._clip_info.setText(
-            f"Clip {index + 1} of {len(self._timeline.clips)}\n\n"
-            f"Source:   {clip.source_start:.2f}s - {clip.source_end:.2f}s\n"
-            f"Duration: {duration:.2f}s\n"
-            f"Target:   {clip.target_start:.2f}s - {clip.target_end:.2f}s\n"
-            f"Target dur: {target_dur:.2f}s\n"
-            f"Score:    {clip.interest_score:.3f}\n\n"
-            f"Section:  {section_label} (energy: {section_energy:.2f})"
+            f"Clip {index + 1}/{len(self._timeline.clips)}"
+            f"  Score: {clip.interest_score:.3f}"
+            f"  Section: {section_label} ({section_energy:.2f})"
+            f"{plate_info}\n"
+            f"Source: {clip.source_start:.2f}s - {clip.source_end:.2f}s"
+            f" ({duration:.2f}s)   "
+            f"Target: {clip.target_start:.2f}s - {clip.target_end:.2f}s"
+            f" ({target_dur:.2f}s)"
         )
 
     def _on_clip_selected(self, index: int):
@@ -565,11 +684,32 @@ class ReviewPage(QWidget):
         self._active_clip_end = clip.source_end
         self._show_clip_info(index)
 
+        # Update plate overlay for the selected clip
+        self._sync_overlay_to_current_clip()
+
     def _on_user_seeked(self):
         if self._previewing:
             return  # Transport callback handles this; should not fire
+        self._select_clip_at_position()
+
+    def _select_clip_at_position(self):
+        """Select the clip containing the current playback position, or deselect."""
+        current_time = self._player.current_time
+        clips = self._timeline.clips
+        for i, clip in enumerate(clips):
+            if clip.source_start <= current_time < clip.source_end:
+                if self._timeline.selected_index != i:
+                    self._timeline._selected = i
+                    self._timeline.update()
+                    self._show_clip_info(i)
+                    self._sync_overlay_to_current_clip()
+                return
+        # Position is not within any clip — deselect
         if self._timeline.selected_index >= 0:
-            self._timeline.select_clip(-1)
+            self._timeline._selected = -1
+            self._timeline.update()
+            self._clip_info.setText("No clip selected")
+            self._active_clip_end = None
 
     def _check_clip_boundary(self, position: float):
         if self._previewing:
@@ -583,14 +723,7 @@ class ReviewPage(QWidget):
         self._on_clip_selected(index)
 
     def _on_export(self):
-        settings = {
-            "transition_style": self._transition.currentText(),
-            "crossfade_duration": self._crossfade_dur.value(),
-            "output_preset": self._preset.currentText(),
-            "output_fps": self._output_fps.value(),
-            "output_threads": self._threads.value(),
-        }
-        self.export_requested.emit(settings)
+        self.export_requested.emit()
 
     def _prev_clip(self):
         clips = self._timeline.clips
@@ -624,10 +757,32 @@ class ReviewPage(QWidget):
         else:
             self._timeline.select_clip(new_index)
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._plate_overlay.isVisible():
+            self._position_overlay()
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        if self._plate_overlay.isVisible():
+            self._position_overlay()
+
+    def _on_app_state_changed(self, state):
+        if state == Qt.ApplicationActive and self._plate_overlay.isVisible():
+            self._plate_overlay.raise_()
+            self._position_overlay()
+
     def hideEvent(self, event):
+        self._plate_overlay.hide()
         self._stop_preview_if_active()
         self._player.pause()
         super().hideEvent(event)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._plate_data and self._chk_show_plates.isChecked():
+            self._plate_overlay.show()
+            self._position_overlay()
 
     def get_current_clips(self) -> list[EditDecision]:
         return list(self._timeline.clips)
@@ -636,3 +791,349 @@ class ReviewPage(QWidget):
     def _fmt(seconds: float) -> str:
         m, s = divmod(int(seconds), 60)
         return f"{m:02d}:{s:02d}"
+
+    # --- Plate Detection ---
+
+    def _on_detect_plates(self):
+        """Start plate detection on selected clip or all clips."""
+        from trailvideocut.plate.model_manager import get_model_path
+
+        clips = self._timeline.clips
+        if not clips or not self._video_path:
+            if self._chk_debug_plates.isChecked():
+                print(f"[PlateDetect] No data: clips={len(clips) if clips else 0}, "
+                      f"video_path='{self._video_path}'")
+            QMessageBox.warning(
+                self, "Cannot Detect Plates",
+                "No video or clips available. Run analysis first.",
+            )
+            return
+
+        # Check if model is already cached
+        model_path = get_model_path()
+        if model_path is not None:
+            if self._chk_debug_plates.isChecked():
+                print(f"[PlateDetect] Model found at {model_path}")
+            self._start_plate_detection(str(model_path))
+            return
+
+        # Model not cached — download it
+        if self._chk_debug_plates.isChecked():
+            print("[PlateDetect] Model not found, starting download...")
+        self._start_model_download()
+
+    def _start_model_download(self):
+        """Download the plate detection model with a progress dialog."""
+        from trailvideocut.ui.workers import ModelDownloadWorker
+
+        self._download_dialog = QProgressDialog(
+            "Downloading plate detection model...", "Cancel", 0, 100, self,
+        )
+        self._download_dialog.setWindowTitle("Model Download")
+        self._download_dialog.setMinimumWidth(400)
+        self._download_dialog.setAutoClose(False)
+        self._download_dialog.setAutoReset(False)
+
+        self._download_worker = ModelDownloadWorker(parent=self)
+        self._download_worker.progress.connect(self._on_download_progress)
+        self._download_worker.finished.connect(self._on_download_finished)
+        self._download_worker.error.connect(self._on_download_error)
+
+        self._download_dialog.canceled.connect(self._download_worker.terminate)
+        self._download_dialog.show()
+        self._download_worker.start()
+
+    def _on_download_progress(self, downloaded: int, total: int):
+        if total > 0:
+            pct = int(downloaded * 100 / total)
+            self._download_dialog.setValue(pct)
+            mb_done = downloaded / 1_048_576
+            mb_total = total / 1_048_576
+            self._download_dialog.setLabelText(
+                f"Downloading plate detection model... {mb_done:.1f} / {mb_total:.1f} MB"
+            )
+
+    def _on_download_finished(self, model_path: str):
+        if self._chk_debug_plates.isChecked():
+            print(f"[PlateDetect] Model downloaded to {model_path}")
+        self._download_dialog.close()
+        self._download_dialog = None
+        self._download_worker = None
+        self._start_plate_detection(model_path)
+
+    def _on_download_error(self, message: str):
+        if self._chk_debug_plates.isChecked():
+            print(f"[PlateDetect] Download error: {message}")
+        self._download_dialog.close()
+        self._download_dialog = None
+        self._download_worker = None
+        QMessageBox.critical(
+            self, "Model Download Failed",
+            f"Could not download the plate detection model:\n\n{message}",
+        )
+
+    def _start_plate_detection(self, model_path: str):
+        """Launch plate detection worker with the given model."""
+        from trailvideocut.ui.workers import PlateDetectionWorker
+
+        clips = self._timeline.clips
+        selected = self._timeline.selected_index
+        if 0 <= selected < len(clips):
+            clip = clips[selected]
+            clip_list = [(selected, clip.source_start, clip.source_end)]
+        else:
+            clip_list = [
+                (i, c.source_start, c.source_end) for i, c in enumerate(clips)
+            ]
+
+        # Activate progress UI
+        self._plate_progress_bar.setValue(0)
+        self._plate_progress_bar.setFormat("Detecting plates...")
+        self._btn_cancel_detect.setEnabled(True)
+        self._btn_detect_plates.setEnabled(False)
+
+        # Launch worker
+        self._plate_worker = PlateDetectionWorker(
+            video_path=self._video_path,
+            clips=clip_list,
+            model_path=model_path,
+            confidence_threshold=self._spin_confidence.value(),
+            exclude_phones=self._chk_exclude_phones.isChecked(),
+            debug=self._chk_debug_plates.isChecked(),
+            min_ratio=self._spin_min_ratio.value(),
+            max_ratio=self._spin_max_ratio.value(),
+            min_plate_px_w=self._spin_min_w.value(),
+            min_plate_px_h=self._spin_min_h.value(),
+            parent=self,
+        )
+        self._plate_worker.progress.connect(self._on_plate_progress)
+        self._plate_worker.finished.connect(self._on_plate_finished)
+        self._plate_worker.error.connect(self._on_plate_error)
+        self._plate_worker.start()
+
+    def _on_cancel_detect(self):
+        if self._plate_worker is not None:
+            self._plate_worker.stop()
+
+    def _on_plate_progress(self, clip_index: int, frame: int, total: int):
+        clips = self._timeline.clips
+        total_clips = len(clips)
+        self._plate_progress_bar.setMaximum(total)
+        self._plate_progress_bar.setValue(frame)
+        self._plate_progress_bar.setFormat(
+            f"Detecting plates: clip {clip_index + 1}/{total_clips}, "
+            f"frame {frame}/{total}"
+        )
+
+    def _on_plate_finished(self, results: dict):
+        """Handle completed plate detection."""
+        # Merge results, preserving manual boxes from re-detection
+        for clip_idx, new_data in results.items():
+            if clip_idx in self._plate_data:
+                existing = self._plate_data[clip_idx]
+                # Preserve manual boxes from all frames
+                manual_boxes: dict[int, list[PlateBox]] = {}
+                for frame, boxes in existing.detections.items():
+                    manuals = [b for b in boxes if b.manual]
+                    if manuals:
+                        manual_boxes[frame] = manuals
+                # Start from new detections and merge manuals back
+                for frame, manuals in manual_boxes.items():
+                    if frame in new_data.detections:
+                        new_data.detections[frame].extend(manuals)
+                    else:
+                        new_data.detections[frame] = manuals
+
+            self._plate_data[clip_idx] = new_data
+
+        # Log detection summary
+        if self._chk_debug_plates.isChecked():
+            for clip_idx, data in results.items():
+                frames = sorted(data.detections.keys())
+                total = sum(len(b) for b in data.detections.values())
+                frame_range = f"{frames[0]}-{frames[-1]}" if frames else "none"
+                print(f"[PlateDetect] Clip {clip_idx}: {total} boxes in "
+                      f"{len(frames)} frames (range: {frame_range})")
+
+        # Reset progress, re-enable button
+        self._plate_progress_bar.setValue(0)
+        self._plate_progress_bar.setFormat("")
+        self._btn_cancel_detect.setEnabled(False)
+        self._btn_detect_plates.setEnabled(True)
+
+        # Enable plate UI
+        self._chk_show_plates.setEnabled(True)
+        self._btn_add_plate.setEnabled(True)
+        self._plate_overlay.setVisible(self._chk_show_plates.isChecked())
+
+        # Update overlay for current frame
+        self._sync_overlay_to_current_clip()
+
+        self._plate_worker = None
+
+    def _on_plate_error(self, message: str):
+        if self._chk_debug_plates.isChecked():
+            print(f"[PlateDetect] Error: {message}")
+        self._plate_progress_bar.setValue(0)
+        self._plate_progress_bar.setFormat("")
+        self._btn_cancel_detect.setEnabled(False)
+        self._btn_detect_plates.setEnabled(True)
+        self._plate_worker = None
+        QMessageBox.critical(
+            self, "Plate Detection Error",
+            f"An error occurred during plate detection:\n\n{message}",
+        )
+
+    def _on_toggle_plates_visible(self, visible: bool):
+        show = visible and bool(self._plate_data)
+        self._plate_overlay.setVisible(show)
+        self._btn_add_plate.setEnabled(show)
+        if show:
+            self._position_overlay()
+
+    def _sync_overlay_to_current_clip(self):
+        """Set the overlay's clip data based on the currently selected/active clip."""
+        self._ensure_video_dims()
+        clip_data = None
+
+        selected = self._timeline.selected_index
+        if selected >= 0 and selected in self._plate_data:
+            clip_data = self._plate_data[selected]
+        else:
+            # Find clip for current video position
+            current_time = self._player.current_time
+            clips = self._timeline.clips
+            for i, clip in enumerate(clips):
+                if clip.source_start <= current_time <= clip.source_end:
+                    if i in self._plate_data:
+                        clip_data = self._plate_data[i]
+                    break
+
+        self._plate_overlay.set_clip_data(clip_data)
+
+        # Set geometry and current frame immediately so boxes are visible now
+        self._position_overlay()
+        fps = self._player.fps
+        frame_num = int(self._player.current_time * fps)
+        self._plate_overlay.set_current_frame(frame_num, force=True)
+        self._refresh_plate_list()
+
+    def _ensure_video_dims(self):
+        """Cache and set video dimensions on the overlay."""
+        if self._video_dims is None and self._video_path:
+            import cv2
+            cap = cv2.VideoCapture(self._video_path)
+            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            cap.release()
+            self._video_dims = (w, h)
+        if self._video_dims:
+            self._plate_overlay.set_video_size(*self._video_dims)
+
+    def _position_overlay(self):
+        """Position the overlay as a top-level window over the video display area."""
+        display = self._player.video_widget
+        if not display.isVisible():
+            return
+        global_pos = display.mapToGlobal(display.rect().topLeft())
+        self._plate_overlay.setGeometry(
+            global_pos.x(), global_pos.y(), display.width(), display.height(),
+        )
+        self._update_overlay_effective_rect()
+
+    def _on_zoom_changed(self, zoom: float):
+        """Update overlay's effective video rect and zoom state when zoom/pan changes."""
+        self._plate_overlay.set_zoom(zoom)
+        if self._plate_overlay.isVisible():
+            self._update_overlay_effective_rect()
+
+    def _update_overlay_effective_rect(self):
+        """Compute and set the effective video rect on the overlay."""
+        eff = self._player.get_effective_video_rect()
+        if eff.isEmpty():
+            self._plate_overlay.set_effective_video_rect(None)
+        else:
+            self._plate_overlay.set_effective_video_rect(eff)
+
+    def _on_overlay_unexpectedly_hidden(self):
+        """Restore the overlay if it was hidden by the window manager."""
+        if self._chk_show_plates.isChecked() and self._plate_data and self.isVisible():
+            QTimer.singleShot(0, self._restore_overlay)
+
+    def _restore_overlay(self):
+        if self._chk_show_plates.isChecked() and self._plate_data and self.isVisible():
+            self._plate_overlay.show()
+            self._position_overlay()
+            self._plate_overlay.raise_()
+
+    def _refresh_plate_list(self):
+        """Populate the plate list widget with all boxes in the current frame."""
+        self._plate_list_updating = True
+        try:
+            self._plate_list.clear()
+            boxes = self._plate_overlay._current_boxes()
+            for box in boxes:
+                kind = "M" if box.manual else "D"
+                text = (
+                    f"[{kind}] ({box.x:.3f},{box.y:.3f}) "
+                    f"{box.w:.3f}\u00d7{box.h:.3f} "
+                    f"C:{box.confidence:.0%}"
+                )
+                self._plate_list.addItem(text)
+            sel = self._plate_overlay._selected_idx
+            if 0 <= sel < self._plate_list.count():
+                self._plate_list.setCurrentRow(sel)
+            else:
+                self._plate_list.setCurrentRow(-1)
+        finally:
+            self._plate_list_updating = False
+
+    def _update_plate_overlay_frame(self, position: float):
+        """Update the overlay's current frame based on video playback position."""
+        if not self._plate_overlay.isVisible():
+            return
+        fps = self._player.fps
+        frame_num = int(position * fps)
+        self._plate_overlay.set_current_frame(frame_num)
+        self._position_overlay()
+        self._refresh_plate_list()
+
+    def _on_add_plate(self):
+        """Add a manual plate box at the current frame."""
+        if not self._plate_overlay.isVisible():
+            return
+
+        # Get current clip data
+        selected = self._timeline.selected_index
+        if selected < 0 or selected not in self._plate_data:
+            # Create clip data if detection was run but this clip has no data yet
+            clips = self._timeline.clips
+            if selected >= 0:
+                self._plate_data[selected] = ClipPlateData(clip_index=selected)
+                self._plate_overlay.set_clip_data(self._plate_data[selected])
+
+        # Clone from nearest prior detection
+        prior = self._plate_overlay.find_nearest_prior_box()
+        if prior:
+            new_box = PlateBox(
+                x=prior.x, y=prior.y, w=prior.w, h=prior.h,
+                confidence=0.0, manual=True,
+            )
+        else:
+            # Default centered box
+            new_box = PlateBox(
+                x=0.425, y=0.475, w=0.15, h=0.05,
+                confidence=0.0, manual=True,
+            )
+
+        self._plate_overlay.add_box(new_box)
+
+    def _on_plate_selection_changed(self):
+        """Sync overlay selection state to the plate list widget."""
+        self._refresh_plate_list()
+
+    def _on_plate_list_selection_changed(self, row: int):
+        """Handle user selecting a plate in the list widget."""
+        if self._plate_list_updating:
+            return
+        self._plate_overlay.select_box(row)
