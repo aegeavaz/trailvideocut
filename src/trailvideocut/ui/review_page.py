@@ -59,6 +59,9 @@ class ReviewPage(QWidget):
         self._plate_worker = None
         self._video_dims: tuple[int, int] | None = None  # (width, height)
         self._plate_list_updating: bool = False  # guard against selection loops
+        self._cached_detector = None  # lazily cached PlateDetector
+        self._cached_detector_settings: tuple | None = None  # settings fingerprint
+        self._pending_frame_detect: bool = False  # flag for post-download frame detect
 
         self._build_ui()
 
@@ -180,6 +183,34 @@ class ReviewPage(QWidget):
         btn_row.addWidget(self._chk_show_plates)
 
         plate_layout.addLayout(btn_row)
+
+        # Second action buttons row
+        btn_row2 = QHBoxLayout()
+        self._btn_detect_frame = QPushButton("Detect Frame")
+        self._btn_detect_frame.setEnabled(False)
+        self._btn_detect_frame.setToolTip(
+            "Re-run plate detection on the current frame only"
+        )
+        self._btn_detect_frame.clicked.connect(self._on_detect_frame)
+        btn_row2.addWidget(self._btn_detect_frame)
+
+        self._btn_clear_clip_plates = QPushButton("Clear Clip Plates")
+        self._btn_clear_clip_plates.setEnabled(False)
+        self._btn_clear_clip_plates.setToolTip(
+            "Delete all plates (detected and manual) in the selected clip"
+        )
+        self._btn_clear_clip_plates.clicked.connect(self._on_clear_clip_plates)
+        btn_row2.addWidget(self._btn_clear_clip_plates)
+
+        self._btn_clear_frame_plates = QPushButton("Clear Frame Plates")
+        self._btn_clear_frame_plates.setEnabled(False)
+        self._btn_clear_frame_plates.setToolTip(
+            "Delete all plates (detected and manual) in the current frame"
+        )
+        self._btn_clear_frame_plates.clicked.connect(self._on_clear_frame_plates)
+        btn_row2.addWidget(self._btn_clear_frame_plates)
+
+        plate_layout.addLayout(btn_row2)
 
         # Settings row
         detect_row = QHBoxLayout()
@@ -314,8 +345,8 @@ class ReviewPage(QWidget):
         QShortcut(Qt.Key_Home, self, self._player._go_start, context=ctx)
         QShortcut(Qt.Key_End, self, self._player._go_end, context=ctx)
         QShortcut(Qt.Key_Escape, self, self._stop_preview_if_active, context=ctx)
-        QShortcut(Qt.Key_Delete, self, self._plate_overlay.delete_selected, context=ctx)
-        QShortcut(Qt.Key_Backspace, self, self._plate_overlay.delete_selected, context=ctx)
+        QShortcut(Qt.Key_Delete, self, self._on_delete_key, context=ctx)
+        QShortcut(Qt.Key_Backspace, self, self._on_delete_key, context=ctx)
 
     def set_data(
         self,
@@ -905,7 +936,11 @@ class ReviewPage(QWidget):
         self._download_dialog.close()
         self._download_dialog = None
         self._download_worker = None
-        self._start_plate_detection(model_path)
+        if self._pending_frame_detect:
+            self._pending_frame_detect = False
+            self._run_single_frame_detection(model_path)
+        else:
+            self._start_plate_detection(model_path)
 
     def _on_download_error(self, message: str):
         if self._chk_debug_plates.isChecked():
@@ -913,6 +948,7 @@ class ReviewPage(QWidget):
         self._download_dialog.close()
         self._download_dialog = None
         self._download_worker = None
+        self._pending_frame_detect = False
         QMessageBox.critical(
             self, "Model Download Failed",
             f"Could not download the plate detection model:\n\n{message}",
@@ -937,6 +973,9 @@ class ReviewPage(QWidget):
         self._plate_progress_bar.setFormat("Detecting plates...")
         self._btn_cancel_detect.setEnabled(True)
         self._btn_detect_plates.setEnabled(False)
+        self._btn_detect_frame.setEnabled(False)
+        self._btn_clear_clip_plates.setEnabled(False)
+        self._btn_clear_frame_plates.setEnabled(False)
 
         # Launch worker
         self._plate_worker = PlateDetectionWorker(
@@ -1022,6 +1061,7 @@ class ReviewPage(QWidget):
         self._sync_overlay_to_current_clip()
 
         self._plate_worker = None
+        self._update_frame_buttons()
 
     def _on_plate_error(self, message: str):
         if self._chk_debug_plates.isChecked():
@@ -1031,6 +1071,7 @@ class ReviewPage(QWidget):
         self._btn_cancel_detect.setEnabled(False)
         self._btn_detect_plates.setEnabled(True)
         self._plate_worker = None
+        self._update_frame_buttons()
         QMessageBox.critical(
             self, "Plate Detection Error",
             f"An error occurred during plate detection:\n\n{message}",
@@ -1069,6 +1110,7 @@ class ReviewPage(QWidget):
         frame_num = round(self._player.current_time * fps)
         self._plate_overlay.set_current_frame(frame_num, force=True)
         self._refresh_plate_list()
+        self._update_frame_buttons()
 
     def _ensure_video_dims(self):
         """Cache and set video dimensions on the overlay."""
@@ -1143,12 +1185,14 @@ class ReviewPage(QWidget):
     def _update_plate_overlay_frame(self, position: float):
         """Update the overlay's current frame based on video playback position."""
         if not self._plate_overlay.isVisible():
+            self._update_frame_buttons()
             return
         fps = self._player.fps
         frame_num = round(position * fps)
         self._plate_overlay.set_current_frame(frame_num)
         self._position_overlay()
         self._refresh_plate_list()
+        self._update_frame_buttons()
 
     def _on_add_plate(self, cursor_nx: float | None = None, cursor_ny: float | None = None):
         """Add a manual plate box at the current frame.
@@ -1223,8 +1267,216 @@ class ReviewPage(QWidget):
         self._chk_show_plates.setEnabled(False)
         self._btn_add_plate.setEnabled(False)
         self._btn_clear_plates.setEnabled(False)
+        self._btn_detect_frame.setEnabled(False)
+        self._btn_clear_clip_plates.setEnabled(False)
+        self._btn_clear_frame_plates.setEnabled(False)
         self._lbl_plate_status.setText("")
         self._refresh_plate_list()
+
+    # --- Single-frame detection ---
+
+    def _get_detector_settings(self) -> tuple:
+        """Return a tuple fingerprint of current UI detection settings."""
+        return (
+            self._spin_confidence.value(),
+            self._chk_exclude_phones.isChecked(),
+            self._spin_phone_gap.value(),
+            self._spin_min_ratio.value(),
+            self._spin_max_ratio.value(),
+            self._spin_min_w.value(),
+            self._spin_min_h.value(),
+        )
+
+    def _get_or_create_detector(self, model_path: str):
+        """Return a cached PlateDetector, recreating if settings changed."""
+        from trailvideocut.plate.detector import PlateDetector
+
+        settings = self._get_detector_settings()
+        if self._cached_detector is not None and self._cached_detector_settings == settings:
+            return self._cached_detector
+
+        self._cached_detector = PlateDetector(
+            model_path=model_path,
+            confidence_threshold=self._spin_confidence.value(),
+            exclude_phones=self._chk_exclude_phones.isChecked(),
+            phone_redetect_every=self._spin_phone_gap.value(),
+            verbose=self._chk_debug_plates.isChecked(),
+            min_ratio=self._spin_min_ratio.value(),
+            max_ratio=self._spin_max_ratio.value(),
+            min_plate_px_w=self._spin_min_w.value(),
+            min_plate_px_h=self._spin_min_h.value(),
+        )
+        self._cached_detector_settings = settings
+        return self._cached_detector
+
+    def _on_detect_frame(self):
+        """Run plate detection on the current frame only."""
+        from trailvideocut.plate.model_manager import get_model_path
+
+        clips = self._timeline.clips
+        if not clips or not self._video_path:
+            return
+
+        model_path = get_model_path()
+        if model_path is not None:
+            self._run_single_frame_detection(str(model_path))
+            return
+
+        # Model not cached — download it, then run frame detection
+        self._pending_frame_detect = True
+        self._start_model_download()
+
+    def _run_single_frame_detection(self, model_path: str):
+        """Extract current frame and run tiled detection on it."""
+        import cv2 as _cv2
+
+        selected = self._timeline.selected_index
+        clips = self._timeline.clips
+        if selected < 0 or selected >= len(clips):
+            # Try to find clip at current position
+            current_time = self._player.current_time
+            for i, clip in enumerate(clips):
+                if clip.source_start <= current_time <= clip.source_end:
+                    selected = i
+                    break
+            if selected < 0:
+                return
+
+        fps = self._player.fps
+        frame_num = round(self._player.current_time * fps)
+
+        # Extract frame from video
+        cap = _cv2.VideoCapture(self._video_path)
+        cap.set(_cv2.CAP_PROP_POS_FRAMES, frame_num)
+        ret, frame = cap.read()
+        cap.release()
+
+        if not ret or frame is None:
+            QMessageBox.warning(
+                self, "Frame Read Error",
+                f"Could not read frame {frame_num} from the video.",
+            )
+            return
+
+        detector = self._get_or_create_detector(model_path)
+        new_boxes = detector.detect_frame_tiled(frame)
+
+        if self._chk_debug_plates.isChecked():
+            print(f"[PlateDetect] Frame {frame_num}: {len(new_boxes)} boxes detected")
+
+        # Get or create clip data
+        if selected not in self._plate_data:
+            self._plate_data[selected] = ClipPlateData(clip_index=selected)
+
+        clip_data = self._plate_data[selected]
+
+        # Preserve manual boxes for this frame
+        existing_boxes = clip_data.detections.get(frame_num, [])
+        manual_boxes = [b for b in existing_boxes if b.manual]
+
+        # Replace auto boxes with new detections, keep manuals
+        if new_boxes or manual_boxes:
+            clip_data.detections[frame_num] = new_boxes + manual_boxes
+        elif frame_num in clip_data.detections:
+            del clip_data.detections[frame_num]
+
+        self._save_plates()
+
+        # Enable plate UI and refresh
+        self._chk_show_plates.setEnabled(True)
+        self._btn_add_plate.setEnabled(True)
+        self._btn_clear_plates.setEnabled(True)
+        self._plate_overlay.setVisible(self._chk_show_plates.isChecked())
+        self._sync_overlay_to_current_clip()
+        self._update_frame_buttons()
+
+    # --- Clear clip / frame plates ---
+
+    def _on_clear_clip_plates(self):
+        """Delete all plates for the selected clip after confirmation."""
+        selected = self._timeline.selected_index
+        if selected < 0 or selected not in self._plate_data:
+            return
+
+        reply = QMessageBox.question(
+            self, "Clear Clip Plates",
+            f"Delete all plates (detected and manual) for clip {selected + 1}?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        del self._plate_data[selected]
+
+        if not self._plate_data:
+            # No plate data left — clean up fully
+            if self._video_path:
+                delete_plates(self._video_path)
+            self._plate_overlay.set_clip_data(None)
+            self._plate_overlay.setVisible(False)
+            self._chk_show_plates.setEnabled(False)
+            self._btn_add_plate.setEnabled(False)
+            self._btn_clear_plates.setEnabled(False)
+            self._btn_detect_frame.setEnabled(False)
+            self._btn_clear_clip_plates.setEnabled(False)
+            self._btn_clear_frame_plates.setEnabled(False)
+        else:
+            self._save_plates()
+            self._sync_overlay_to_current_clip()
+
+        self._refresh_plate_list()
+        self._update_frame_buttons()
+
+    def _on_delete_key(self):
+        """Del/Backspace: delete selected plate, or clear frame if none selected."""
+        if self._plate_overlay.selected_box() is not None:
+            self._plate_overlay.delete_selected()
+        else:
+            self._on_clear_frame_plates()
+
+    def _on_clear_frame_plates(self):
+        """Delete all plates for the current frame."""
+        selected = self._timeline.selected_index
+        if selected < 0 or selected not in self._plate_data:
+            return
+
+        fps = self._player.fps
+        frame_num = round(self._player.current_time * fps)
+        clip_data = self._plate_data[selected]
+
+        if frame_num not in clip_data.detections:
+            return
+
+        del clip_data.detections[frame_num]
+        self._save_plates()
+        self._sync_overlay_to_current_clip()
+        self._update_frame_buttons()
+
+    # --- Button state helpers ---
+
+    def _update_frame_buttons(self):
+        """Update enabled state of Detect Frame, Clear Clip Plates, Clear Frame Plates."""
+        selected = self._timeline.selected_index
+        clips = self._timeline.clips
+        has_video = bool(self._video_path)
+        has_clip = 0 <= selected < len(clips) if clips else False
+        detecting = self._plate_worker is not None
+
+        # Detect Frame: needs video + clip selected + not currently detecting
+        self._btn_detect_frame.setEnabled(has_video and has_clip and not detecting)
+
+        # Clear Clip Plates: needs selected clip with plate data
+        clip_has_plates = has_clip and selected in self._plate_data
+        self._btn_clear_clip_plates.setEnabled(clip_has_plates and not detecting)
+
+        # Clear Frame Plates: needs current frame with plates
+        frame_has_plates = False
+        if clip_has_plates:
+            fps = self._player.fps
+            frame_num = round(self._player.current_time * fps)
+            frame_has_plates = frame_num in self._plate_data[selected].detections
+        self._btn_clear_frame_plates.setEnabled(frame_has_plates and not detecting)
 
     def _on_plate_list_selection_changed(self, row: int):
         """Handle user selecting a plate in the list widget."""
