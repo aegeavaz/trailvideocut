@@ -219,7 +219,7 @@ class VideoPlayer(QWidget):
     def update_time_label_external(self, current_s: float, total_s: float):
         """Update time label from external source."""
         self._time_label.setText(f"{self._fmt(current_s)} / {self._fmt(total_s)}")
-        frame = int(current_s * self._fps)
+        frame = round(current_s * self._fps)
         self._frame_label.setText(f"F: {frame}")
 
     def restore_slider_range(self):
@@ -240,8 +240,14 @@ class VideoPlayer(QWidget):
         self._fit_video()
         self.zoom_changed.emit(self._zoom_factor)
 
-    def _fit_video(self):
-        """Fit the video item in the view, respecting current zoom level."""
+    def _fit_video(self, anchor_scene: QPointF | None = None, anchor_vp: QPointF | None = None):
+        """Fit the video item in the view, respecting current zoom level.
+
+        If *anchor_scene* and *anchor_vp* are given, adjust scroll bars so that
+        *anchor_scene* (a point in scene coordinates) appears at *anchor_vp*
+        (a point in viewport coordinates) after the transform — this implements
+        cursor-centered zoom.
+        """
         if self._video_item is None:
             return
         rect = self._video_item.boundingRect()
@@ -251,6 +257,14 @@ class VideoPlayer(QWidget):
         self._view.fitInView(self._video_item, Qt.KeepAspectRatio)
         if self._zoom_factor > 1.0:
             self._view.scale(self._zoom_factor, self._zoom_factor)
+
+        if anchor_scene is not None and anchor_vp is not None and self._zoom_factor > 1.0:
+            # Where the anchor scene point ended up in viewport coords after the new transform
+            new_vp = self._view.mapFromScene(anchor_scene)
+            hs = self._view.horizontalScrollBar()
+            vs = self._view.verticalScrollBar()
+            hs.setValue(hs.value() + int(new_vp.x() - anchor_vp.x()))
+            vs.setValue(vs.value() + int(new_vp.y() - anchor_vp.y()))
 
     def pan_video(self, dx: int, dy: int):
         """Pan the video view by pixel deltas (called by overlay for drag-pan)."""
@@ -472,14 +486,14 @@ class VideoPlayer(QWidget):
         if self._on_transport:
             self._on_transport("step_forward")
             return
-        frame_ms = int(1000.0 / self._fps)
+        frame_ms = round(1000.0 / self._fps)
         self._user_seek(min(self._player.position() + frame_ms, self._duration_ms))
 
     def _step_back(self):
         if self._on_transport:
             self._on_transport("step_back")
             return
-        frame_ms = int(1000.0 / self._fps)
+        frame_ms = round(1000.0 / self._fps)
         self._user_seek(max(self._player.position() - frame_ms, 0))
 
     # --- helpers ---
@@ -488,7 +502,7 @@ class VideoPlayer(QWidget):
         self._time_label.setText(
             f"{self._fmt(self.current_time)} / {self._fmt(self.duration)}"
         )
-        frame = int(self._player.position() / 1000.0 * self._fps)
+        frame = round(self._player.position() / 1000.0 * self._fps)
         self._frame_label.setText(f"F: {frame}")
 
     @staticmethod
@@ -509,8 +523,16 @@ class VideoPlayer(QWidget):
             new_zoom = max(self._min_zoom, min(self._max_zoom, new_zoom))
             if abs(new_zoom - 1.0) < 0.05:
                 new_zoom = 1.0
+            if new_zoom == self._zoom_factor:
+                event.accept()
+                return
+
+            # Capture scene point under cursor before changing zoom
+            vp_pos = self._view.mapFrom(self, event.position().toPoint())
+            scene_pos = self._view.mapToScene(vp_pos)
+
             self._zoom_factor = new_zoom
-            self._fit_video()
+            self._fit_video(anchor_scene=scene_pos, anchor_vp=QPointF(vp_pos))
             self.zoom_changed.emit(self._zoom_factor)
             event.accept()
             return

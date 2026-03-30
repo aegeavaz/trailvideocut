@@ -175,11 +175,13 @@ class PlateDetectionWorker(QThread):
         confidence_threshold: float = 0.25,
         tiled: bool = True,
         exclude_phones: bool = False,
+        phone_redetect_every: int = 30,
         debug: bool = False,
         min_ratio: float = 1.2,
         max_ratio: float = 2.0,
         min_plate_px_w: int = 15,
         min_plate_px_h: int = 10,
+        min_track_length: int = 1,
         parent=None,
     ):
         super().__init__(parent)
@@ -189,11 +191,13 @@ class PlateDetectionWorker(QThread):
         self._threshold = confidence_threshold
         self._tiled = tiled
         self._exclude_phones = exclude_phones
+        self._phone_redetect_every = phone_redetect_every
         self._debug = debug
         self._min_ratio = min_ratio
         self._max_ratio = max_ratio
         self._min_plate_px_w = min_plate_px_w
         self._min_plate_px_h = min_plate_px_h
+        self._min_track_length = min_track_length
         self._cancelled = False
 
     def stop(self):
@@ -206,6 +210,7 @@ class PlateDetectionWorker(QThread):
             detector = PlateDetector(
                 self._model_path, self._threshold,
                 exclude_phones=self._exclude_phones,
+                phone_redetect_every=self._phone_redetect_every,
                 verbose=self._debug,
                 min_ratio=self._min_ratio,
                 max_ratio=self._max_ratio,
@@ -227,6 +232,7 @@ class PlateDetectionWorker(QThread):
                     progress_callback=_progress,
                     cancelled=lambda: self._cancelled,
                     tiled=self._tiled,
+                    min_track_length=self._min_track_length,
                 )
                 results[clip_index] = data
 

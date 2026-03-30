@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 from trailvideocut.audio.models import AudioAnalysis, MusicSection
 from trailvideocut.editor.models import CutPlan, EditDecision
 from trailvideocut.plate.models import ClipPlateData, PlateBox
+from trailvideocut.plate.storage import delete_plates, load_plates, save_plates
 from trailvideocut.ui.plate_overlay import PlateOverlayWidget
 from trailvideocut.ui.timeline import TimelineWidget
 from trailvideocut.ui.video_player import VideoPlayer
@@ -122,7 +123,7 @@ class ReviewPage(QWidget):
             self._on_overlay_unexpectedly_hidden,
         )
         self._plate_overlay.selection_changed.connect(self._on_plate_selection_changed)
-        self._plate_overlay.box_changed.connect(self._on_plate_selection_changed)
+        self._plate_overlay.box_changed.connect(self._on_plate_box_changed)
         self._plate_overlay.add_plate_requested.connect(self._on_add_plate)
 
         # Spacing between player controls and bottom section
@@ -195,6 +196,15 @@ class ReviewPage(QWidget):
         self._chk_exclude_phones.setToolTip("Exclude detected phone/device regions from plate results")
         detect_row.addWidget(self._chk_exclude_phones)
 
+        detect_row.addWidget(QLabel("Gap:"))
+        self._spin_phone_gap = QSpinBox()
+        self._spin_phone_gap.setRange(5, 120)
+        self._spin_phone_gap.setValue(30)
+        self._spin_phone_gap.setSingleStep(5)
+        self._spin_phone_gap.setToolTip("Re-detect phone every N frames (lower = more accurate, slower)")
+        detect_row.addWidget(self._spin_phone_gap)
+        self._chk_exclude_phones.toggled.connect(self._spin_phone_gap.setEnabled)
+
         self._chk_debug_plates = QCheckBox("Debug")
         self._chk_debug_plates.setToolTip("Print plate detection debug info to the console")
         detect_row.addWidget(self._chk_debug_plates)
@@ -232,8 +242,29 @@ class ReviewPage(QWidget):
         self._spin_min_h.setValue(5)
         self._spin_min_h.setToolTip("Minimum plate height in pixels")
         ratio_row.addWidget(self._spin_min_h)
+
+        ratio_row.addWidget(QLabel("Min Track:"))
+        self._spin_min_track = QSpinBox()
+        self._spin_min_track.setRange(1, 30)
+        self._spin_min_track.setValue(1)
+        self._spin_min_track.setToolTip("Minimum consecutive frames a plate must appear in to be kept")
+        ratio_row.addWidget(self._spin_min_track)
         ratio_row.addStretch()
         plate_layout.addLayout(ratio_row)
+
+        # Persistence controls row
+        persist_row = QHBoxLayout()
+        self._btn_clear_plates = QPushButton("Clear Saved Plates")
+        self._btn_clear_plates.setEnabled(False)
+        self._btn_clear_plates.setToolTip("Delete saved plate data from disk and clear all detections")
+        self._btn_clear_plates.clicked.connect(self._on_clear_plates)
+        persist_row.addWidget(self._btn_clear_plates)
+
+        self._lbl_plate_status = QLabel()
+        self._lbl_plate_status.setStyleSheet("font-size: 11px; color: #4CAF50;")
+        persist_row.addWidget(self._lbl_plate_status)
+        persist_row.addStretch()
+        plate_layout.addLayout(persist_row)
 
         self._plate_list = QListWidget()
         self._plate_list.setStyleSheet("font-family: monospace; font-size: 11px; color: #ccc;")
@@ -326,6 +357,21 @@ class ReviewPage(QWidget):
         # Load video
         if video_path:
             self._player.load_video(video_path)
+
+        # Auto-load persisted plate data
+        self._plate_data = {}
+        self._lbl_plate_status.setText("")
+        if video_path and cut_plan.decisions:
+            valid_indices = set(range(len(cut_plan.decisions)))
+            loaded = load_plates(video_path, valid_clip_indices=valid_indices)
+            if loaded:
+                self._plate_data = loaded
+                self._chk_show_plates.setEnabled(True)
+                self._btn_add_plate.setEnabled(True)
+                self._btn_clear_plates.setEnabled(True)
+                self._lbl_plate_status.setText("Plates loaded from disk")
+                self._plate_overlay.setVisible(self._chk_show_plates.isChecked())
+                self._sync_overlay_to_current_clip()
 
         # Clip info
         self._clip_info.setText("Click a clip on the timeline to see details")
@@ -899,11 +945,13 @@ class ReviewPage(QWidget):
             model_path=model_path,
             confidence_threshold=self._spin_confidence.value(),
             exclude_phones=self._chk_exclude_phones.isChecked(),
+            phone_redetect_every=self._spin_phone_gap.value(),
             debug=self._chk_debug_plates.isChecked(),
             min_ratio=self._spin_min_ratio.value(),
             max_ratio=self._spin_max_ratio.value(),
             min_plate_px_w=self._spin_min_w.value(),
             min_plate_px_h=self._spin_min_h.value(),
+            min_track_length=self._spin_min_track.value(),
             parent=self,
         )
         self._plate_worker.progress.connect(self._on_plate_progress)
@@ -946,6 +994,9 @@ class ReviewPage(QWidget):
 
             self._plate_data[clip_idx] = new_data
 
+        # Persist to disk
+        self._save_plates()
+
         # Log detection summary
         if self._chk_debug_plates.isChecked():
             for clip_idx, data in results.items():
@@ -964,6 +1015,7 @@ class ReviewPage(QWidget):
         # Enable plate UI
         self._chk_show_plates.setEnabled(True)
         self._btn_add_plate.setEnabled(True)
+        self._btn_clear_plates.setEnabled(True)
         self._plate_overlay.setVisible(self._chk_show_plates.isChecked())
 
         # Update overlay for current frame
@@ -1014,7 +1066,7 @@ class ReviewPage(QWidget):
         # Set geometry and current frame immediately so boxes are visible now
         self._position_overlay()
         fps = self._player.fps
-        frame_num = int(self._player.current_time * fps)
+        frame_num = round(self._player.current_time * fps)
         self._plate_overlay.set_current_frame(frame_num, force=True)
         self._refresh_plate_list()
 
@@ -1093,13 +1145,17 @@ class ReviewPage(QWidget):
         if not self._plate_overlay.isVisible():
             return
         fps = self._player.fps
-        frame_num = int(position * fps)
+        frame_num = round(position * fps)
         self._plate_overlay.set_current_frame(frame_num)
         self._position_overlay()
         self._refresh_plate_list()
 
-    def _on_add_plate(self):
-        """Add a manual plate box at the current frame."""
+    def _on_add_plate(self, cursor_nx: float | None = None, cursor_ny: float | None = None):
+        """Add a manual plate box at the current frame.
+
+        *cursor_nx/ny* are normalized coordinates from a right-click.  When
+        called from the button the overlay's last mouse position is used instead.
+        """
         if not self._plate_overlay.isVisible():
             return
 
@@ -1112,17 +1168,30 @@ class ReviewPage(QWidget):
                 self._plate_data[selected] = ClipPlateData(clip_index=selected)
                 self._plate_overlay.set_clip_data(self._plate_data[selected])
 
-        # Clone from nearest prior detection
-        prior = self._plate_overlay.find_nearest_prior_box()
-        if prior:
+        # Clone from nearest detection (prior preferred, then next frame)
+        ref = self._plate_overlay.find_nearest_reference_box()
+        if ref:
             new_box = PlateBox(
-                x=prior.x, y=prior.y, w=prior.w, h=prior.h,
+                x=ref.x, y=ref.y, w=ref.w, h=ref.h,
                 confidence=0.0, manual=True,
             )
         else:
-            # Default centered box
+            # Resolve cursor position for fallback placement
+            if cursor_nx is None or cursor_ny is None:
+                mouse_pos = self._plate_overlay.get_last_mouse_norm_pos()
+                if mouse_pos is not None:
+                    cursor_nx, cursor_ny = mouse_pos
+
+            default_w, default_h = 0.15, 0.05
+            if cursor_nx is not None and cursor_ny is not None:
+                # Center the box on the cursor, clamped to frame
+                bx = max(0.0, min(1.0 - default_w, cursor_nx - default_w / 2))
+                by = max(0.0, min(1.0 - default_h, cursor_ny - default_h / 2))
+            else:
+                bx, by = 0.425, 0.475
+
             new_box = PlateBox(
-                x=0.425, y=0.475, w=0.15, h=0.05,
+                x=bx, y=by, w=default_w, h=default_h,
                 confidence=0.0, manual=True,
             )
 
@@ -1130,6 +1199,31 @@ class ReviewPage(QWidget):
 
     def _on_plate_selection_changed(self):
         """Sync overlay selection state to the plate list widget."""
+        self._refresh_plate_list()
+
+    def _on_plate_box_changed(self):
+        """Handle box modification (add/move/resize/delete) — refresh list and save."""
+        self._refresh_plate_list()
+        self._save_plates()
+
+    def _save_plates(self):
+        """Persist plate data to the sidecar file."""
+        if self._video_path and self._plate_data:
+            save_plates(self._video_path, self._plate_data)
+            self._btn_clear_plates.setEnabled(True)
+            self._lbl_plate_status.setText("")
+
+    def _on_clear_plates(self):
+        """Delete sidecar file and clear all in-memory plate data."""
+        if self._video_path:
+            delete_plates(self._video_path)
+        self._plate_data = {}
+        self._plate_overlay.set_clip_data(None)
+        self._plate_overlay.setVisible(False)
+        self._chk_show_plates.setEnabled(False)
+        self._btn_add_plate.setEnabled(False)
+        self._btn_clear_plates.setEnabled(False)
+        self._lbl_plate_status.setText("")
         self._refresh_plate_list()
 
     def _on_plate_list_selection_changed(self, row: int):

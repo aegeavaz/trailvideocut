@@ -39,7 +39,7 @@ def cut(
         0.2, "--crossfade", help="Crossfade duration in seconds"
     ),
     min_segment: float = typer.Option(
-        1.0, "--min-segment", help="Minimum segment duration in seconds"
+        1.5, "--min-segment", help="Minimum segment duration in seconds"
     ),
     max_segment: float = typer.Option(
         8.0, "--max-segment", help="Maximum segment duration in seconds"
@@ -215,6 +215,10 @@ def detect_plates(
         True, "--exclude-phones/--no-exclude-phones",
         help="Auto-detect phones/GPS devices and exclude from plate results",
     ),
+    phone_gap: int = typer.Option(
+        30, "--phone-gap",
+        help="Re-detect phone every N frames (lower = more accurate, slower)",
+    ),
     continuity_filter: bool = typer.Option(
         True, "--continuity-filter/--no-continuity-filter",
         help="Remove sporadic detections lacking temporal continuity",
@@ -289,6 +293,7 @@ def detect_plates(
         str(model_path),
         confidence_threshold=threshold,
         exclude_phones=exclude_phones,
+        phone_redetect_every=phone_gap,
     )
 
     if detector._has_cuda:

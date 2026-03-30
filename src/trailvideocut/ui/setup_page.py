@@ -145,7 +145,7 @@ class SetupPage(QWidget):
 
         self._min_segment = QDoubleSpinBox()
         self._min_segment.setRange(0.5, 30.0)
-        self._min_segment.setValue(1.0)
+        self._min_segment.setValue(1.5)
         self._min_segment.setSingleStep(0.5)
         self._min_segment.setToolTip("Minimum clip duration in seconds. Clips shorter than this are discarded.")
         col1.addRow("Min Segment (s):", self._min_segment)

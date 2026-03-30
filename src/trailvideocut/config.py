@@ -29,7 +29,7 @@ class TrailVideoCutConfig:
     # Segment selection
     transition_style: TransitionStyle = TransitionStyle.CROSSFADE
     crossfade_duration: float = 0.2
-    min_segment_duration: float = 1.0
+    min_segment_duration: float = 1.5
     max_segment_duration: float = 8.0
     include_timestamps: list[float] = field(default_factory=list)
 

@@ -142,3 +142,50 @@ class TestClipPlateDataManipulation:
 
         assert result is not None
         assert result.x == pytest.approx(0.5)
+
+
+class TestFindNearestReferenceBox:
+    """Test bidirectional reference box search logic (mirrors PlateOverlayWidget.find_nearest_reference_box)."""
+
+    @staticmethod
+    def _find_nearest_reference_box(data: ClipPlateData, current_frame: int) -> PlateBox | None:
+        """Pure-function replica of the widget method for testing without Qt."""
+        # Search backward
+        for frame in sorted(data.detections.keys(), reverse=True):
+            if frame < current_frame:
+                boxes = data.detections[frame]
+                if boxes:
+                    return boxes[0]
+        # Search forward
+        for frame in sorted(data.detections.keys()):
+            if frame > current_frame:
+                boxes = data.detections[frame]
+                if boxes:
+                    return boxes[0]
+        return None
+
+    def test_returns_prior_frame_box(self):
+        """Prior frame detection is preferred over later frames."""
+        data = ClipPlateData(clip_index=0, detections={
+            10: [PlateBox(0.1, 0.2, 0.3, 0.1)],
+            30: [PlateBox(0.5, 0.6, 0.2, 0.1)],
+        })
+        result = self._find_nearest_reference_box(data, current_frame=25)
+        assert result is not None
+        assert result.x == pytest.approx(0.1)
+
+    def test_returns_next_frame_box_when_no_prior(self):
+        """Falls back to the next frame when no prior frame has detections."""
+        data = ClipPlateData(clip_index=0, detections={
+            20: [PlateBox(0.4, 0.5, 0.2, 0.08)],
+            50: [PlateBox(0.6, 0.7, 0.1, 0.05)],
+        })
+        result = self._find_nearest_reference_box(data, current_frame=5)
+        assert result is not None
+        assert result.x == pytest.approx(0.4)
+
+    def test_returns_none_when_no_detections(self):
+        """Returns None when no frame has any detections."""
+        data = ClipPlateData(clip_index=0, detections={})
+        result = self._find_nearest_reference_box(data, current_frame=10)
+        assert result is None

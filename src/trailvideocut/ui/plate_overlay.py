@@ -24,7 +24,7 @@ class PlateOverlayWidget(QWidget):
     box_changed = Signal()  # emitted when any box is modified/added/deleted
     selection_changed = Signal()  # emitted when selected box changes
     unexpectedly_hidden = Signal()  # emitted when WM hides the overlay
-    add_plate_requested = Signal()  # right-click with no selection
+    add_plate_requested = Signal(float, float)  # right-click norm (x, y)
 
     def __init__(self, parent=None):
         # Top-level frameless translucent window so it floats above
@@ -192,15 +192,34 @@ class PlateOverlayWidget(QWidget):
             self.box_changed.emit()
             self.update()
 
-    def find_nearest_prior_box(self) -> PlateBox | None:
-        """Find the nearest plate box from a prior frame."""
+    def find_nearest_reference_box(self) -> PlateBox | None:
+        """Find the nearest plate box from any frame (prior preferred, then next)."""
         if self._clip_data is None:
             return None
+        # Search backward first
         for frame in sorted(self._clip_data.detections.keys(), reverse=True):
             if frame < self._current_frame:
                 boxes = self._clip_data.detections[frame]
                 if boxes:
                     return boxes[0]
+        # No prior frame — search forward
+        for frame in sorted(self._clip_data.detections.keys()):
+            if frame > self._current_frame:
+                boxes = self._clip_data.detections[frame]
+                if boxes:
+                    return boxes[0]
+        return None
+
+    def get_last_mouse_norm_pos(self) -> tuple[float, float] | None:
+        """Return the last known mouse position in normalized video coordinates, or None."""
+        pos = self.mapFromGlobal(QCursor.pos())
+        vr = self._video_rect()
+        if vr.isEmpty() or vr.width() == 0 or vr.height() == 0:
+            return None
+        nx = (pos.x() - vr.x()) / vr.width()
+        ny = (pos.y() - vr.y()) / vr.height()
+        if 0.0 <= nx <= 1.0 and 0.0 <= ny <= 1.0:
+            return (nx, ny)
         return None
 
     def set_effective_video_rect(self, rect: QRectF | None):
@@ -353,7 +372,8 @@ class PlateOverlayWidget(QWidget):
         if self._selected_idx >= 0:
             self.delete_selected()
         else:
-            self.add_plate_requested.emit()
+            nx, ny = self._widget_to_norm(event.position().x(), event.position().y())
+            self.add_plate_requested.emit(nx, ny)
         event.accept()
         self._forward_focus()
 

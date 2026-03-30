@@ -79,6 +79,7 @@ class PlateDetector:
         model_path: str | Path,
         confidence_threshold: float = 0.05,
         exclude_phones: bool = False,
+        phone_redetect_every: int = _PHONE_REDETECT_EVERY,
         verbose: bool = False,
         min_ratio: float = 0.5,
         max_ratio: float = 2.0,
@@ -89,6 +90,7 @@ class PlateDetector:
         self._model_path = str(model_path)
         self._has_cuda = False
         self._exclude_phones = exclude_phones
+        self._phone_redetect_every = max(1, phone_redetect_every)
         self._verbose = verbose
         self._min_ratio = min_ratio
         self._max_ratio = max_ratio
@@ -231,10 +233,13 @@ class PlateDetector:
             w_px = box.w * frame_w
             h_px = box.h * frame_h
             aspect = w_px / h_px if h_px > 0 else 0
+            x_px = int(box.x * frame_w)
+            y_px = int(box.y * frame_h)
             if w_px < self._min_plate_px_w or h_px < self._min_plate_px_h:
                 if self._verbose:
                     self._print_frame_header()
                     print(f"[PlateDetect]   FILTERED (too small) | "
+                          f"pos: ({x_px}, {y_px}) px | "
                           f"size: {w_px:.0f}x{h_px:.0f} px | "
                           f"aspect: {aspect:.2f} | "
                           f"confidence: {box.confidence:.1%}")
@@ -243,14 +248,13 @@ class PlateDetector:
                 if self._verbose:
                     self._print_frame_header()
                     print(f"[PlateDetect]   FILTERED (bad aspect) | "
+                          f"pos: ({x_px}, {y_px}) px | "
                           f"size: {w_px:.0f}x{h_px:.0f} px | "
                           f"aspect: {aspect:.2f} | "
                           f"confidence: {box.confidence:.1%}")
                 continue
             if self._verbose:
                 self._print_frame_header()
-                x_px = int(box.x * frame_w)
-                y_px = int(box.y * frame_h)
                 print(f"[PlateDetect]   KEPT               | "
                       f"pos: ({x_px}, {y_px}) px | "
                       f"size: {w_px:.0f}x{h_px:.0f} px | "
@@ -322,11 +326,9 @@ class PlateDetector:
             if zones:
                 self._phone_zones = zones
             return
-        # Once found, periodically refresh
-        if self._phone_frame_counter % self._PHONE_REDETECT_EVERY == 0:
-            zones = self.detect_phones(frame)
-            if zones:
-                self._phone_zones = zones
+        # Once found, periodically refresh (clear if phone disappears)
+        if self._phone_frame_counter % self._phone_redetect_every == 0:
+            self._phone_zones = self.detect_phones(frame)
 
     def _filter_phone_zones(self, boxes: list[PlateBox]) -> list[PlateBox]:
         """Remove plate detections whose center falls inside a phone exclusion zone."""
@@ -425,6 +427,10 @@ class PlateDetector:
         total_frames = max(1, end_frame - start_frame)
 
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+
+        # Reset phone exclusion state for each clip
+        self._phone_zones = []
+        self._phone_frame_counter = 0
 
         result = ClipPlateData(clip_index=clip_index)
         frames_done = 0
