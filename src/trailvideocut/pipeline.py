@@ -74,7 +74,7 @@ class TrailVideoCutPipeline:
             )
 
         # Print video results
-        console.print(f"\n[bold blue]Phase 2/5:[/] Video analysis complete")
+        console.print("\n[bold blue]Phase 2/5:[/] Video analysis complete")
         console.print(f"  {len(segments)} segments scored")
 
         # Resolve auto-detect FPS from source video

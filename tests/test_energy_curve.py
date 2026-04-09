@@ -1,8 +1,6 @@
 import numpy as np
-import pytest
 
 from trailvideocut.audio.energy_curve import (
-    EnergyTransition,
     compute_smoothed_energy,
     detect_energy_transitions,
 )

@@ -1,8 +1,8 @@
-import json
 import os
 import re
 import subprocess
 import threading
+from collections.abc import Callable
 from fractions import Fraction
 
 from rich.console import Console
@@ -16,8 +16,38 @@ from moviepy.audio.fx.AudioFadeOut import AudioFadeOut
 from trailvideocut.config import TrailVideoCutConfig, TransitionStyle
 from trailvideocut.editor.models import CutPlan
 from trailvideocut.gpu import _find_ffmpeg, configure_moviepy_ffmpeg, detect_gpu, get_encoder_codec, patch_nvenc_pixel_format
+from trailvideocut.plate.models import ClipPlateData
 
 console = Console()
+
+
+class _MoviePyProgressLogger:
+    """Adapts MoviePy's proglog logger interface to a (current, total) callback.
+
+    MoviePy's ``write_videofile`` accepts either ``"bar"`` or a proglog
+    ``ProgressBarLogger`` instance.  This lightweight wrapper implements the
+    minimal interface that proglog's ``default_bar_logger`` expects so that
+    encoding progress is forwarded to the UI.
+    """
+
+    def __init__(self, progress_callback):
+        self._cb = progress_callback
+        self._total = 0
+
+    # proglog calls __call__ for plain messages
+    def __call__(self, **kw):
+        message = kw.get("message", "")
+        if message:
+            console.print(f"  {message.strip()}")
+
+    # proglog calls iter_bar for progress iteration
+    def iter_bar(self, **kw):
+        for bar_name, iterable in kw.items():
+            iterable = list(iterable)
+            self._total = len(iterable)
+            for i, item in enumerate(iterable):
+                yield item
+                self._cb(i + 1, self._total)
 
 # Map x264 presets to NVENC preset equivalents
 _NVENC_PRESET_MAP = {
@@ -50,10 +80,13 @@ class VideoAssembler:
     def __init__(
         self,
         config: TrailVideoCutConfig,
-        progress_callback: "Callable[[int, int], None] | None" = None,
+        progress_callback: Callable[[int, int], None] | None = None,
+        status_callback: Callable[[str], None] | None = None,
     ):
         self.config = config
         self._progress_callback = progress_callback
+        self._status_callback = status_callback
+        self._blur_temp_files: list[str] = []
 
     def _get_threads(self) -> int:
         """Return the number of FFmpeg threads to use.
@@ -65,31 +98,166 @@ class VideoAssembler:
         cpu = os.cpu_count() or 4
         return max(4, cpu - 2)
 
-    def assemble(self, plan: CutPlan) -> None:
+    def assemble(
+        self,
+        plan: CutPlan,
+        plate_data: dict[int, ClipPlateData] | None = None,
+    ) -> None:
         """Execute the cut plan: extract subclips, concatenate, add audio, export."""
         self._resolve_fps()
-        if (
-            plan.transition_style == TransitionStyle.CROSSFADE.value
-            and len(plan.decisions) > 1
-        ):
+        self._blur_temp_files.clear()
+
+        has_blur = (
+            plate_data
+            and self.config.plate_blur_enabled
+            and any(cpd.detections for cpd in plate_data.values())
+        )
+
+        if has_blur:
+            # MoviePy with calibrated offset + velocity-expanded blur boxes.
+            # The expansion covers ±1 frame of plate movement, making blur
+            # robust to the unavoidable timing drift in all pipelines.
+            console.print("  Using MoviePy with drift-tolerant blur...")
+            self._assemble_moviepy(plan, plate_data)
+            return
+
+        try:
+            if (
+                plan.transition_style == TransitionStyle.CROSSFADE.value
+                and len(plan.decisions) > 1
+            ):
+                try:
+                    self._assemble_ffmpeg_xfade(plan, None)
+                    return
+                except Exception as e:
+                    console.print(
+                        f"  [yellow]FFmpeg xfade failed ({e}), "
+                        f"falling back to MoviePy...[/yellow]"
+                    )
+                    if self._status_callback:
+                        self._status_callback("FFmpeg failed, falling back to MoviePy...")
+            else:
+                try:
+                    self._assemble_ffmpeg_hardcut(plan, None)
+                    return
+                except Exception as e:
+                    console.print(
+                        f"  [yellow]FFmpeg hardcut failed ({e}), "
+                        f"falling back to MoviePy...[/yellow]"
+                    )
+                    if self._status_callback:
+                        self._status_callback("FFmpeg failed, falling back to MoviePy...")
+            self._assemble_moviepy(plan, None)
+        finally:
+            self._cleanup_blur_temps()
+
+    def _cleanup_blur_temps(self) -> None:
+        """Remove temporary pre-processed blur segment files."""
+        for path in self._blur_temp_files:
             try:
-                self._assemble_ffmpeg_xfade(plan)
-                return
-            except Exception as e:
-                console.print(
-                    f"  [yellow]FFmpeg xfade failed ({e}), "
-                    f"falling back to MoviePy...[/yellow]"
-                )
-        else:
-            try:
-                self._assemble_ffmpeg_hardcut(plan)
-                return
-            except Exception as e:
-                console.print(
-                    f"  [yellow]FFmpeg hardcut failed ({e}), "
-                    f"falling back to MoviePy...[/yellow]"
-                )
-        self._assemble_moviepy(plan)
+                os.unlink(path)
+            except OSError:
+                pass
+        self._blur_temp_files.clear()
+
+    def _probe_rational_fps(self, source_fps: float) -> str:
+        """Probe the source video's exact rational frame rate via FFmpeg.
+
+        Returns a string like ``"24000/1001"`` or ``"30.0"`` suitable for
+        FFmpeg's ``-r`` flag.  Falls back to ``str(source_fps)``.
+        """
+        ffmpeg_bin = _require_ffmpeg()
+        rational_fps = str(source_fps)
+        try:
+            probe = subprocess.run(
+                [ffmpeg_bin, "-hide_banner", "-i", str(self.config.video_path)],
+                capture_output=True, text=True, timeout=10,
+            )
+            tbr_match = re.search(
+                r"(\d+(?:/\d+)?(?:\.\d+)?)\s+tbr", probe.stderr,
+            )
+            if tbr_match:
+                tbr_str = tbr_match.group(1)
+                if "/" in tbr_str:
+                    rational_fps = tbr_str
+                else:
+                    tbr_val = float(tbr_str)
+                    for num, den in [(24000, 1001), (30000, 1001), (60000, 1001),
+                                     (24, 1), (25, 1), (30, 1), (50, 1), (60, 1)]:
+                        if abs(num / den - tbr_val) < 0.02:
+                            rational_fps = f"{num}/{den}"
+                            break
+                    else:
+                        rational_fps = tbr_str
+                console.print(f"  Source frame rate: {rational_fps}")
+        except Exception:
+            pass
+        return rational_fps
+
+    def _probe_source_video(self) -> tuple[int, int, float, str]:
+        """Probe source video dimensions, FPS, and rational FPS.
+
+        Returns ``(width, height, source_fps, rational_fps)``.
+        """
+        import cv2
+        cap = cv2.VideoCapture(str(self.config.video_path))
+        fw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        fh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        source_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        cap.release()
+        rational_fps = self._probe_rational_fps(source_fps)
+        return fw, fh, source_fps, rational_fps
+
+    def _preprocess_blur_segments(
+        self,
+        segments: list[tuple[float, float, int]],
+        plate_data: dict[int, ClipPlateData] | None,
+    ) -> tuple[list[tuple[str, float] | None], float]:
+        """Pre-process segments that have plate data, returning blurred temp file paths.
+
+        Each segment is ``(start, duration, clip_index)``.
+        Returns ``(overrides, source_fps)`` where *overrides* is a list
+        parallel to *segments*.  Each element is either:
+        - ``(temp_path, exact_duration)`` for a blurred segment, or
+        - ``None`` for a segment that needs no blur (use original source).
+        """
+        if not plate_data or not self.config.plate_blur_enabled:
+            return [None] * len(segments), 0.0, ""
+
+        from trailvideocut.plate.blur import PlateBlurProcessor
+
+        fw, fh, source_fps, rational_fps = self._probe_source_video()
+
+        result: list[tuple[str, float] | None] = []
+        for seg_idx, (start, dur, clip_idx) in enumerate(segments):
+            cpd = plate_data.get(clip_idx)
+            if cpd is None or not cpd.detections:
+                result.append(None)
+                continue
+
+            console.print(f"  Pre-processing blur for segment {seg_idx + 1} (clip {clip_idx})...")
+            proc = PlateBlurProcessor(
+                video_path=str(self.config.video_path),
+                segment_start=start,
+                segment_duration=dur,
+                clip_plate_data=cpd,
+                fps=source_fps,
+                frame_width=fw,
+                frame_height=fh,
+                clip_index=clip_idx,
+                rational_fps=rational_fps,
+            )
+            tmp_path, frames_written = proc.process_segment(
+                progress_callback=self._progress_callback,
+            )
+            self._blur_temp_files.append(str(tmp_path))
+            # Compute exact duration from the actual frame count to avoid
+            # floating-point drift between the segment duration and the
+            # temp file's frame count.
+            exact_dur = frames_written / source_fps
+            result.append((str(tmp_path), exact_dur))
+
+        return result, source_fps, rational_fps
 
     # ------------------------------------------------------------------
     # FFmpeg native xfade path (fast)
@@ -132,7 +300,7 @@ class VideoAssembler:
         raise RuntimeError(f"Could not determine duration of {filepath}")
 
     def _build_segments(self, plan: CutPlan, source_duration: float):
-        """Build list of (start, duration) for each segment."""
+        """Build list of (start, duration, clip_index) for each segment."""
         decisions = plan.decisions
         xfade_dur = plan.crossfade_duration
         n = len(decisions)
@@ -146,34 +314,63 @@ class VideoAssembler:
             dur = end - start
             if dur < 0.05:
                 continue
-            segments.append((start, dur))
+            segments.append((start, dur, i))
         return segments
 
     def _build_filter_complex(
         self, segments: list[tuple[float, float]],
         audio_input_idx: int, audio_duration: float,
+        has_blur_segments: bool = False,
+        source_fps: float = 0,
+        blur_overrides: list | None = None,
+        rational_fps: str = "",
     ) -> str:
         xfade_dur = self.config.crossfade_duration
         n = len(segments)
         filters: list[str] = []
 
-        # Each segment is a separate input, so [0:v], [1:v], etc.
-        # Audio is input index `audio_input_idx`
+        # When blur segments are mixed with original segments, normalize
+        # all inputs so xfade works.
+        # Blur segments (MKV/FFV1): already have correct frame rate from
+        # the container — just reset timestamps with setpts, no fps= needed.
+        # Source segments: use fps= to normalize their timebase.
+        if has_blur_segments:
+            fps_str = rational_fps or str(source_fps if source_fps > 0 else self.config.output_fps)
+            # Compute timebase string (1/fps) for settb on blur segments
+            if "/" in fps_str:
+                num, den = fps_str.split("/")
+                tb_str = f"{den}/{num}"
+            else:
+                tb_str = f"1/{fps_str}"
+            for i in range(n):
+                is_blur = blur_overrides and blur_overrides[i] is not None
+                if is_blur:
+                    # Match source timebase + reset start — no fps= resampling
+                    filters.append(
+                        f"[{i}:v]settb={tb_str},setpts=PTS-STARTPTS[v{i}]"
+                    )
+                else:
+                    filters.append(
+                        f"[{i}:v]fps={fps_str},format=yuv420p[v{i}]"
+                    )
+            input_label = lambda i: f"v{i}"  # noqa: E731
+        else:
+            input_label = lambda i: f"{i}:v"  # noqa: E731
 
         # --- A) Chain xfade filters ---
         if n == 1:
-            final_label = "0:v"
+            final_label = input_label(0)
             cumulative = segments[0][1]
         else:
             cumulative = segments[0][1]
-            prev_label = "0:v"
+            prev_label = input_label(0)
             for i in range(1, n):
                 offset = cumulative - xfade_dur
                 if offset < 0:
                     offset = 0.0
                 out_label = f"vx{i}" if i < n - 1 else "vout"
                 filters.append(
-                    f"[{prev_label}][{i}:v]xfade=transition=fade"
+                    f"[{prev_label}][{input_label(i)}]xfade=transition=fade"
                     f":duration={xfade_dur:.6f}:offset={offset:.6f}[{out_label}]"
                 )
                 prev_label = out_label
@@ -208,7 +405,11 @@ class VideoAssembler:
 
         return ";".join(filters)
 
-    def _assemble_ffmpeg_xfade(self, plan: CutPlan) -> None:
+    def _assemble_ffmpeg_xfade(
+        self,
+        plan: CutPlan,
+        plate_data: dict[int, ClipPlateData] | None = None,
+    ) -> None:
         """Assemble video using FFmpeg native xfade filter (fast path).
 
         Uses per-segment input seeking (-ss/-t) instead of trim filters
@@ -221,10 +422,30 @@ class VideoAssembler:
         if not segments:
             raise RuntimeError("No valid segments for FFmpeg assembly")
 
+        blur_overrides, source_fps, rational_fps = self._preprocess_blur_segments(segments, plate_data)
+        has_blur = any(b is not None for b in blur_overrides)
+
+        # When a blurred temp file replaces a source segment, use the
+        # temp file's exact duration (computed from its frame count)
+        # instead of the original segment duration, to avoid frame-count
+        # drift in the filter graph.
+        effective_segments = []
+        for i, (start, dur, clip_idx) in enumerate(segments):
+            override = blur_overrides[i]
+            if override is not None:
+                _tmp_path, exact_dur = override
+                effective_segments.append((start, exact_dur, clip_idx))
+            else:
+                effective_segments.append((start, dur, clip_idx))
+
         audio_input_idx = len(segments)
 
         filter_complex = self._build_filter_complex(
-            segments, audio_input_idx, audio_duration,
+            effective_segments, audio_input_idx, audio_duration,
+            has_blur_segments=has_blur,
+            source_fps=source_fps,
+            blur_overrides=blur_overrides,
+            rational_fps=rational_fps,
         )
 
         codec = get_encoder_codec(force_cpu=not self.config.use_gpu)
@@ -236,10 +457,18 @@ class VideoAssembler:
         ffmpeg_bin = _require_ffmpeg()
         cmd = [ffmpeg_bin, "-y"]
 
-        # Per-segment inputs with fast seeking
+        # Per-segment inputs: source video with fast seeking, or
+        # pre-blurred MKV files (lossless FFV1 with proper timestamps).
         video_path = str(self.config.video_path)
-        for start, dur in segments:
-            cmd.extend(["-ss", f"{start:.6f}", "-t", f"{dur:.6f}", "-i", video_path])
+
+        for i, (start, dur, _clip_idx) in enumerate(segments):
+            override = blur_overrides[i]
+            if override is not None:
+                tmp_path, _exact_dur = override
+                # MKV/FFV1 file — read normally (has timestamps + frame rate)
+                cmd.extend(["-i", tmp_path])
+            else:
+                cmd.extend(["-ss", f"{start:.6f}", "-t", f"{dur:.6f}", "-i", video_path])
 
         # Audio input (last input)
         cmd.extend(["-i", str(self.config.audio_path)])
@@ -302,31 +531,47 @@ class VideoAssembler:
     # ------------------------------------------------------------------
 
     def _build_segments_hardcut(self, plan: CutPlan, source_duration: float):
-        """Build list of (start, duration) for hard-cut segments (no xfade extension)."""
+        """Build list of (start, duration, clip_index) for hard-cut segments."""
         segments = []
-        for d in plan.decisions:
+        for i, d in enumerate(plan.decisions):
             start = max(0.0, d.source_start)
             end = min(source_duration, d.source_end)
             dur = end - start
             if dur < 0.05:
                 continue
-            segments.append((start, dur))
+            segments.append((start, dur, i))
         return segments
 
     def _build_filter_complex_hardcut(
         self, segments: list[tuple[float, float]],
         audio_input_idx: int, audio_duration: float,
+        has_blur_segments: bool = False,
+        source_fps: float = 0,
+        blur_overrides: list | None = None,
+        rational_fps: str = "",
     ) -> str:
         n = len(segments)
         filters: list[str] = []
 
+        # See _build_filter_complex for rationale.
+        if has_blur_segments:
+            fps_str = rational_fps or str(source_fps if source_fps > 0 else self.config.output_fps)
+            for i in range(n):
+                is_blur = blur_overrides and blur_overrides[i] is not None
+                if is_blur:
+                    filters.append(f"[{i}:v]fps={fps_str}[v{i}]")
+                else:
+                    filters.append(f"[{i}:v]fps={fps_str},format=yuv420p[v{i}]")
+            concat_inputs = "".join(f"[v{i}]" for i in range(n))
+        else:
+            concat_inputs = "".join(f"[{i}:v]" for i in range(n))
+
         # --- A) Concat all video segments ---
-        concat_inputs = "".join(f"[{i}:v]" for i in range(n))
         filters.append(f"{concat_inputs}concat=n={n}:v=1:a=0[vconcat]")
         final_label = "vconcat"
 
         # --- B) Freeze-frame padding if video < audio ---
-        video_total = sum(dur for _, dur in segments)
+        video_total = sum(seg[1] for seg in segments)
         if video_total < audio_duration - 0.01:
             deficit = audio_duration - video_total
             filters.append(
@@ -353,7 +598,11 @@ class VideoAssembler:
 
         return ";".join(filters)
 
-    def _assemble_ffmpeg_hardcut(self, plan: CutPlan) -> None:
+    def _assemble_ffmpeg_hardcut(
+        self,
+        plan: CutPlan,
+        plate_data: dict[int, ClipPlateData] | None = None,
+    ) -> None:
         """Assemble video using FFmpeg concat filter (hard-cut, no crossfade)."""
         source_duration = self._probe_duration(str(self.config.video_path))
         audio_duration = self._probe_duration(str(self.config.audio_path))
@@ -362,10 +611,27 @@ class VideoAssembler:
         if not segments:
             raise RuntimeError("No valid segments for FFmpeg assembly")
 
+        blur_overrides, source_fps, rational_fps = self._preprocess_blur_segments(segments, plate_data)
+        has_blur = any(b is not None for b in blur_overrides)
+
+        # Use exact temp file durations for the filter graph
+        effective_segments = []
+        for i, (start, dur, clip_idx) in enumerate(segments):
+            override = blur_overrides[i]
+            if override is not None:
+                _tmp_path, exact_dur = override
+                effective_segments.append((start, exact_dur, clip_idx))
+            else:
+                effective_segments.append((start, dur, clip_idx))
+
         audio_input_idx = len(segments)
 
         filter_complex = self._build_filter_complex_hardcut(
-            segments, audio_input_idx, audio_duration,
+            effective_segments, audio_input_idx, audio_duration,
+            has_blur_segments=has_blur,
+            source_fps=source_fps,
+            blur_overrides=blur_overrides,
+            rational_fps=rational_fps,
         )
 
         codec = get_encoder_codec(force_cpu=not self.config.use_gpu)
@@ -377,10 +643,30 @@ class VideoAssembler:
         ffmpeg_bin = _require_ffmpeg()
         cmd = [ffmpeg_bin, "-y"]
 
-        # Per-segment inputs with fast seeking
+        # Per-segment inputs (raw YUV for blurred, source for others).
+        fps_str_rational = rational_fps or str(source_fps)
         video_path = str(self.config.video_path)
-        for start, dur in segments:
-            cmd.extend(["-ss", f"{start:.6f}", "-t", f"{dur:.6f}", "-i", video_path])
+
+        if has_blur:
+            import cv2 as _cv2
+            _cap = _cv2.VideoCapture(video_path)
+            fw = int(_cap.get(_cv2.CAP_PROP_FRAME_WIDTH))
+            fh = int(_cap.get(_cv2.CAP_PROP_FRAME_HEIGHT))
+            _cap.release()
+
+        for i, (start, dur, _clip_idx) in enumerate(segments):
+            override = blur_overrides[i]
+            if override is not None:
+                tmp_path, _exact_dur = override
+                cmd.extend([
+                    "-f", "rawvideo",
+                    "-pix_fmt", "yuv420p",
+                    "-s", f"{fw}x{fh}",
+                    "-r", fps_str_rational,
+                    "-i", tmp_path,
+                ])
+            else:
+                cmd.extend(["-ss", f"{start:.6f}", "-t", f"{dur:.6f}", "-i", video_path])
 
         # Audio input (last input)
         cmd.extend(["-i", str(self.config.audio_path)])
@@ -479,6 +765,9 @@ class VideoAssembler:
 
         if proc.returncode != 0:
             err_text = b"".join(stderr_chunks).decode(errors="replace")
+            # Log the full stderr for debugging
+            console.print("  [red]FFmpeg stderr (last 2000 chars):[/red]")
+            console.print(err_text[-2000:])
             raise RuntimeError(
                 f"FFmpeg exit {proc.returncode}: {err_text[-500:] or 'no stderr'}"
             )
@@ -487,16 +776,86 @@ class VideoAssembler:
     # MoviePy path (fallback)
     # ------------------------------------------------------------------
 
-    def _assemble_moviepy(self, plan: CutPlan) -> None:
+    def _assemble_moviepy(
+        self,
+        plan: CutPlan,
+        plate_data: dict[int, ClipPlateData] | None = None,
+    ) -> None:
         """Assemble video using MoviePy (fallback for hard-cut or xfade failure)."""
         source_clip = VideoFileClip(str(self.config.video_path))
         audio_clip = AudioFileClip(str(self.config.audio_path))
 
         try:
-            subclips = self._extract_subclips(source_clip, plan)
+            subclips_with_idx = self._extract_subclips(source_clip, plan)
 
-            if not subclips:
+            if not subclips_with_idx:
                 raise RuntimeError("No valid subclips produced from cut plan")
+
+            # Apply blur via transform() with calibrated offset + expanded boxes.
+            # Box expansion covers ±1 frame of plate movement, making blur
+            # robust to unavoidable timing drift in all pipelines.
+            if plate_data and self.config.plate_blur_enabled:
+                import cv2 as _cv2
+                from trailvideocut.plate.blur import (
+                    apply_blur_to_frame,
+                    calibrate_frame_offset,
+                    expand_boxes_for_drift,
+                )
+
+                _cap = _cv2.VideoCapture(str(self.config.video_path))
+                source_fps = _cap.get(_cv2.CAP_PROP_FPS) or 30.0
+                _cap.release()
+
+                console.print(
+                    f"  [cyan]BLUR EXPORT (calibrated + drift-tolerant)[/cyan] "
+                    f"fps={source_fps}"
+                )
+
+                def _make_blur_fn(cpd_ref, calibrated_start, fps_val):
+                    """Apply drift-expanded blur to each frame."""
+                    def blur_fn(get_frame, t):
+                        frame = get_frame(t)
+                        abs_frame = calibrated_start + round(t * fps_val)
+                        boxes = expand_boxes_for_drift(
+                            cpd_ref.detections, abs_frame, margin_frames=1,
+                        )
+                        if boxes:
+                            frame = frame.copy()
+                            apply_blur_to_frame(frame, boxes)
+                        return frame
+                    return blur_fn
+
+                blurred = []
+                for sub, clip_idx in subclips_with_idx:
+                    cpd = plate_data.get(clip_idx)
+                    if cpd and cpd.detections:
+                        decision = plan.decisions[clip_idx]
+                        expected_frame = round(decision.source_start * source_fps)
+
+                        # Calibrate: compare MoviePy's first frame with source
+                        moviepy_frame = sub.get_frame(0)
+                        moviepy_bgr = moviepy_frame[:, :, ::-1].copy()
+                        frame_offset = calibrate_frame_offset(
+                            moviepy_bgr,
+                            str(self.config.video_path),
+                            expected_frame,
+                            search_range=3,
+                        )
+                        calibrated_start = expected_frame + frame_offset
+
+                        console.print(
+                            f"  Blur clip {clip_idx}: "
+                            f"expected={expected_frame} offset={frame_offset} "
+                            f"calibrated={calibrated_start}"
+                        )
+
+                        sub = sub.transform(
+                            _make_blur_fn(cpd, calibrated_start, source_fps),
+                        )
+                    blurred.append((sub, clip_idx))
+                subclips_with_idx = blurred
+
+            subclips = [sc for sc, _ in subclips_with_idx]
 
             console.print(f"  Concatenating {len(subclips)} clips...")
 
@@ -548,6 +907,8 @@ class VideoAssembler:
             else:
                 console.print(f"  Exporting to {self.config.output_path} (libx264)...")
 
+            # When blur is active, write at source FPS so MoviePy iterates
+            # at exactly 1 source frame per output frame (no resampling).
             frac = Fraction(self.config.output_fps).limit_denominator(100000)
             fps_rational = f"{frac.numerator}/{frac.denominator}"
 
@@ -563,6 +924,12 @@ class VideoAssembler:
                     "-rc", "vbr", "-cq", "23", "-pix_fmt", "yuv420p",
                 ])
 
+            # Use a custom logger that forwards progress to the UI callback
+            if self._progress_callback:
+                mp_logger = _MoviePyProgressLogger(self._progress_callback)
+            else:
+                mp_logger = "bar"
+
             final_video.write_videofile(
                 str(self.config.output_path),
                 fps=self.config.output_fps,
@@ -571,14 +938,20 @@ class VideoAssembler:
                 preset=preset,
                 threads=self._get_threads(),
                 ffmpeg_params=ffmpeg_params,
-                logger="bar",
+                logger=mp_logger,
             )
         finally:
             source_clip.close()
             audio_clip.close()
 
-    def _extract_subclips(self, source_clip: VideoFileClip, plan: CutPlan) -> list:
-        """Extract subclips from the source video based on edit decisions."""
+    def _extract_subclips(
+        self, source_clip: VideoFileClip, plan: CutPlan,
+    ) -> list[tuple]:
+        """Extract subclips from the source video based on edit decisions.
+
+        Returns a list of ``(subclip, clip_index)`` tuples so callers can
+        map each subclip back to its position in ``plan.decisions``.
+        """
         use_crossfade = (
             plan.transition_style == TransitionStyle.CROSSFADE.value
             and len(plan.decisions) > 1
@@ -593,5 +966,5 @@ class VideoAssembler:
             if end - start < 0.05:
                 continue
             sub = source_clip.subclipped(start, end)
-            subclips.append(sub)
+            subclips.append((sub, i))
         return subclips

@@ -107,7 +107,8 @@ class TestPlateDetectorCancellation:
         def mock_cancelled():
             return frame_count >= 5
 
-        with patch("cv2.VideoCapture") as mock_cap_cls:
+        with patch("cv2.VideoCapture") as mock_cap_cls, \
+             patch("trailvideocut.gpu._find_ffmpeg", return_value=None):
             mock_cap = MagicMock()
             mock_cap_cls.return_value = mock_cap
             mock_cap.get.return_value = 10.0  # 10 fps
@@ -115,7 +116,6 @@ class TestPlateDetectorCancellation:
             mock_cap.read.return_value = (True, np.zeros((100, 100, 3), dtype=np.uint8))
 
             # Mock detect_frame to track calls
-            real_detect = det.detect_frame
             call_count = [0]
 
             def counting_detect(frame):

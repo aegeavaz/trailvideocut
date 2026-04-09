@@ -42,7 +42,7 @@ class SegmentSelector:
         video_duration = segments[-1].end_time
 
         # Compute global energy for energy-weighted scoring
-        global_energy = self._compute_global_energy(audio.sections, video_duration)
+        self._compute_global_energy(audio.sections, video_duration)
 
         # Quality-adaptive cut count: reduce N if footage is uniform
         n_intervals = len(intervals)

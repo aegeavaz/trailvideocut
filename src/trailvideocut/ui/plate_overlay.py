@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QBrush, QColor, QCursor, QPainter, QPen
+from PySide6.QtGui import QBrush, QColor, QCursor, QFont, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QApplication, QWidget
 
 from trailvideocut.plate.models import ClipPlateData, PlateBox
@@ -59,6 +59,9 @@ class PlateOverlayWidget(QWidget):
         self._drag_start: QPointF = QPointF()
         self._drag_box_start: tuple[float, float, float, float] = (0, 0, 0, 0)
         self._hiding_programmatically: bool = False
+
+        # Blur preview tiles: list of (norm_rect, QPixmap)
+        self._blur_tiles: list[tuple[tuple[float, float, float, float], QPixmap]] = []
 
         # Zoom/pan state
         self._effective_video_rect: QRectF | None = None
@@ -236,6 +239,23 @@ class PlateOverlayWidget(QWidget):
         """Inform the overlay of the current zoom level (for pan gesture)."""
         self._zoom_level = zoom
 
+    def set_blur_tiles(
+        self,
+        tiles: list[tuple[tuple[float, float, float, float], QPixmap]],
+    ):
+        """Set blurred plate pixmap tiles for preview rendering.
+
+        Each entry is ``((nx, ny, nw, nh), pixmap)``.
+        """
+        self._blur_tiles = tiles
+        self.update()
+
+    def clear_blur_tiles(self):
+        """Remove all blur preview tiles."""
+        if self._blur_tiles:
+            self._blur_tiles.clear()
+            self.update()
+
     # --- Coordinate mapping ---
 
     def _video_rect(self) -> QRectF:
@@ -301,18 +321,29 @@ class PlateOverlayWidget(QWidget):
         vr = self._video_rect()
         painter.fillRect(vr, QColor(0, 0, 0, 1))
 
+        # Draw blur preview tiles (before boxes so borders are visible on top)
+        for (nx, ny, nw, nh), pixmap in self._blur_tiles:
+            target = self._norm_to_widget(nx, ny, nw, nh)
+            painter.drawPixmap(target.toRect(), pixmap)
+
         boxes = self._current_boxes()
         if not boxes:
             painter.end()
             return
 
+        label_font = QFont()
+        label_font.setPixelSize(10)
+
         for i, box in enumerate(boxes):
             rect = self._norm_to_widget(box.x, box.y, box.w, box.h)
             selected = i == self._selected_idx
 
-            # Fill
-            fill_color = QColor(0, 150, 255, 50) if not selected else QColor(255, 200, 0, 70)
-            painter.setBrush(QBrush(fill_color))
+            # Fill (skip if blur tiles are shown — the pixmap replaces the fill)
+            if not self._blur_tiles:
+                fill_color = QColor(0, 150, 255, 50) if not selected else QColor(255, 200, 0, 70)
+                painter.setBrush(QBrush(fill_color))
+            else:
+                painter.setBrush(Qt.NoBrush)
 
             # Border
             if selected:
@@ -323,6 +354,22 @@ class PlateOverlayWidget(QWidget):
                 pen = QPen(QColor(0, 150, 255), 2, Qt.SolidLine)
             painter.setPen(pen)
             painter.drawRect(rect)
+
+            # Blur % label for non-default blur_strength
+            if box.blur_strength < 0.99:
+                pct = f"{int(box.blur_strength * 100)}%"
+                painter.setFont(label_font)
+                # Background pill
+                fm = painter.fontMetrics()
+                tw = fm.horizontalAdvance(pct) + 6
+                th = fm.height() + 2
+                lx = rect.right() - tw - 2
+                ly = rect.top() + 2
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QColor(0, 0, 0, 160))
+                painter.drawRoundedRect(QRectF(lx, ly, tw, th), 3, 3)
+                painter.setPen(QColor(255, 255, 255))
+                painter.drawText(QRectF(lx, ly, tw, th), Qt.AlignCenter, pct)
 
             # Resize handles for selected box
             if selected:

@@ -2,6 +2,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -13,6 +14,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QRadioButton,
+    QSlider,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -101,6 +103,33 @@ class ExportPage(QWidget):
         render_layout.addRow("Threads:", self._threads)
 
         root.addWidget(render_group)
+
+        # Plate blur settings
+        blur_group = QGroupBox("Plate Blur")
+        blur_layout = QFormLayout(blur_group)
+
+        self._chk_blur_enabled = QCheckBox("Blur detected plates")
+        self._chk_blur_enabled.setChecked(True)
+        self._chk_blur_enabled.setToolTip("Apply Gaussian blur to detected plate regions in the exported video")
+        blur_layout.addRow(self._chk_blur_enabled)
+
+        blur_strength_row = QHBoxLayout()
+        self._slider_blur_default = QSlider(Qt.Horizontal)
+        self._slider_blur_default.setRange(0, 100)
+        self._slider_blur_default.setValue(100)
+        self._slider_blur_default.setToolTip("Default blur intensity for plates (0% = no blur, 100% = max)")
+        blur_strength_row.addWidget(self._slider_blur_default)
+        self._lbl_blur_default = QLabel("100%")
+        self._lbl_blur_default.setFixedWidth(38)
+        blur_strength_row.addWidget(self._lbl_blur_default)
+        self._slider_blur_default.valueChanged.connect(
+            lambda v: self._lbl_blur_default.setText(f"{v}%")
+        )
+        blur_layout.addRow("Default strength:", blur_strength_row)
+
+        self._chk_blur_enabled.toggled.connect(self._slider_blur_default.setEnabled)
+
+        root.addWidget(blur_group)
 
         # Output path
         output_group = QGroupBox("Output")
@@ -215,6 +244,8 @@ class ExportPage(QWidget):
             "output_preset": self._preset.currentText(),
             "output_fps": self._output_fps.value(),
             "output_threads": self._threads.value(),
+            "plate_blur_enabled": self._chk_blur_enabled.isChecked(),
+            "plate_blur_strength": self._slider_blur_default.value() / 100.0,
         }
 
     def reset_status(self):

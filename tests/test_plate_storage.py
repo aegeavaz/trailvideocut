@@ -59,6 +59,39 @@ class TestRoundTrip:
                     assert gb.h == pytest.approx(ob.h)
                     assert gb.confidence == pytest.approx(ob.confidence)
                     assert gb.manual == ob.manual
+                    assert gb.blur_strength == pytest.approx(ob.blur_strength)
+
+    def test_blur_strength_round_trip(self, tmp_path):
+        video = tmp_path / "blur.mp4"
+        video.touch()
+        box = PlateBox(x=0.1, y=0.2, w=0.05, h=0.03, blur_strength=0.6)
+        data = {0: ClipPlateData(clip_index=0, detections={10: [box]})}
+
+        save_plates(video, data)
+        loaded = load_plates(video)
+
+        assert loaded[0].detections[10][0].blur_strength == pytest.approx(0.6)
+
+    def test_legacy_v1_sidecar_rejected(self, tmp_path):
+        video = tmp_path / "legacy.mp4"
+        video.touch()
+        sidecar = tmp_path / "legacy.plates.json"
+        legacy_payload = {
+            "version": 1,
+            "video_file": "legacy.mp4",
+            "clips": {
+                "0": {
+                    "clip_index": 0,
+                    "detections": {
+                        "5": [{"x": 0.1, "y": 0.2, "w": 0.05, "h": 0.03, "confidence": 0.9, "manual": False}]
+                    },
+                }
+            },
+        }
+        sidecar.write_text(json.dumps(legacy_payload), encoding="utf-8")
+
+        loaded = load_plates(video)
+        assert loaded == {}
 
 
 class TestLoadValidation:

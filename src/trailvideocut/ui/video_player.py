@@ -152,6 +152,35 @@ class VideoPlayer(QWidget):
     def zoom_factor(self) -> float:
         return self._zoom_factor
 
+    def grab_current_frame(self):
+        """Grab the currently displayed video frame as a BGR numpy array.
+
+        Uses QMediaPlayer's video sink to capture exactly the frame that
+        the user sees, avoiding any mismatch between QMediaPlayer's
+        decoder and OpenCV's decoder.
+
+        Returns None if no frame is available.
+        """
+        import numpy as np
+
+        sink = self._player.videoSink()
+        if sink is None:
+            return None
+        vf = sink.videoFrame()
+        if not vf.isValid():
+            return None
+        qimg = vf.toImage()
+        if qimg.isNull():
+            return None
+        # Normalize to RGB format for consistent conversion
+        from PySide6.QtGui import QImage
+        qimg = qimg.convertToFormat(QImage.Format.Format_RGB888)
+        w, h = qimg.width(), qimg.height()
+        ptr = qimg.constBits()
+        arr = np.frombuffer(ptr, dtype=np.uint8).reshape((h, w, 3)).copy()
+        # RGB → BGR for OpenCV convention
+        return arr[:, :, ::-1].copy()
+
     def load_video(self, path: str | Path):
         self.stop()
         resolved = str(Path(path).resolve())
@@ -219,7 +248,7 @@ class VideoPlayer(QWidget):
     def update_time_label_external(self, current_s: float, total_s: float):
         """Update time label from external source."""
         self._time_label.setText(f"{self._fmt(current_s)} / {self._fmt(total_s)}")
-        frame = round(current_s * self._fps)
+        frame = int(current_s * self._fps)
         self._frame_label.setText(f"F: {frame}")
 
     def restore_slider_range(self):
@@ -502,7 +531,7 @@ class VideoPlayer(QWidget):
         self._time_label.setText(
             f"{self._fmt(self.current_time)} / {self._fmt(self.duration)}"
         )
-        frame = round(self._player.position() / 1000.0 * self._fps)
+        frame = int(self._player.position() / 1000.0 * self._fps)
         self._frame_label.setText(f"F: {frame}")
 
     @staticmethod

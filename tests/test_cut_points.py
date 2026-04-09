@@ -1,4 +1,3 @@
-import pytest
 
 from trailvideocut.audio.energy_curve import EnergyTransition
 from trailvideocut.audio.models import BeatInfo, MusicSection

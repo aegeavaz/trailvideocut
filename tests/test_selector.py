@@ -1,6 +1,5 @@
 from pathlib import Path
 
-import numpy as np
 import pytest
 
 from trailvideocut.audio.energy_curve import EnergyTransition

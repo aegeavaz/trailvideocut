@@ -418,20 +418,42 @@ class PlateDetector:
         temporal_filter: bool = True,
         min_track_length: int = 3,
     ) -> ClipPlateData:
-        """Detect plates in a clip time range. Returns ClipPlateData."""
+        """Detect plates in a clip time range. Returns ClipPlateData.
+
+        Uses OpenCV ``CAP_PROP_POS_FRAMES`` seeking — the same decoder
+        that ``grab_frame()`` (blur preview) and the blur processor use.
+        This guarantees detection coordinates match the preview and
+        export exactly, avoiding the spatial mismatch between FFmpeg
+        pipe and OpenCV decoders for HEVC video.
+        """
+        return self._detect_clip_opencv(
+            video_path, start_time, end_time, clip_index,
+            progress_callback, cancelled, tiled,
+            temporal_filter, min_track_length,
+        )
+
+    def _detect_clip_opencv(
+        self,
+        video_path: str | Path,
+        start_time: float,
+        end_time: float,
+        clip_index: int = 0,
+        progress_callback: Callable[[int, int], None] | None = None,
+        cancelled: Callable[[], bool] | None = None,
+        tiled: bool = True,
+        temporal_filter: bool = True,
+        min_track_length: int = 3,
+    ) -> ClipPlateData:
+        """OpenCV fallback for detect_clip (used when FFmpeg is not available)."""
         cap = cv2.VideoCapture(str(video_path))
         fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-
         start_frame = int(start_time * fps)
         end_frame = int(end_time * fps)
         total_frames = max(1, end_frame - start_frame)
-
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
 
-        # Reset phone exclusion state for each clip
         self._phone_zones = []
         self._phone_frame_counter = 0
-
         result = ClipPlateData(clip_index=clip_index)
         frames_done = 0
         max_conf_seen = 0.0
@@ -439,15 +461,12 @@ class PlateDetector:
         for frame_num in range(start_frame, end_frame):
             if cancelled and cancelled():
                 break
-
             ret, frame = cap.read()
             if not ret:
                 break
-
             if self._verbose:
                 self._current_frame_num = frame_num
                 self._frame_header_printed = False
-
             detect_fn = self.detect_frame_tiled if tiled else self.detect_frame
             boxes = detect_fn(frame)
             if boxes:
@@ -455,31 +474,19 @@ class PlateDetector:
                 best = max(b.confidence for b in boxes)
                 if best > max_conf_seen:
                     max_conf_seen = best
-
             frames_done += 1
             if progress_callback:
                 progress_callback(frames_done, total_frames)
 
         cap.release()
-
         if progress_callback:
             progress_callback(frames_done, total_frames)
-
         if self._verbose:
-            print(f"[PlateDetect] Clip {clip_index}: processed {frames_done} frames, "
-                  f"max_conf={max_conf_seen:.4f}, threshold={self._threshold}, "
-                  f"detections={len(result.detections)}")
-
+            print(f"[PlateDetect] Clip {clip_index} (OpenCV fallback): "
+                  f"processed {frames_done} frames, max_conf={max_conf_seen:.4f}")
         if temporal_filter:
             from trailvideocut.plate.temporal_filter import filter_temporal_continuity
-            pre = len(result.detections)
-            result = filter_temporal_continuity(
-                result, min_track_length=min_track_length,
-            )
-            post = len(result.detections)
-            if pre != post and self._verbose:
-                print(f"[PlateDetect] Temporal filter: {pre} -> {post} frames with detections")
-
+            result = filter_temporal_continuity(result, min_track_length=min_track_length)
         return result
 
     def _parse_output(

@@ -1,7 +1,5 @@
 from pathlib import Path
 
-import numpy as np
-import pytest
 
 from trailvideocut.audio.models import BeatInfo
 from trailvideocut.audio.analyzer import AudioAnalyzer

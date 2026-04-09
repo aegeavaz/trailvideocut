@@ -133,10 +133,11 @@ class RenderWorker(QThread):
     finished = Signal(str)  # output path
     error = Signal(str)
 
-    def __init__(self, config: TrailVideoCutConfig, cut_plan: CutPlan, parent=None):
+    def __init__(self, config: TrailVideoCutConfig, cut_plan: CutPlan, plate_data=None, parent=None):
         super().__init__(parent)
         self._config = config
         self._cut_plan = cut_plan
+        self._plate_data = plate_data
 
     def run(self):
         try:
@@ -153,8 +154,15 @@ class RenderWorker(QThread):
                 def _progress_cb(current: int, total: int) -> None:
                     self.progress.emit(current, total)
 
-                assembler = VideoAssembler(self._config, progress_callback=_progress_cb)
-                assembler.assemble(self._cut_plan)
+                def _status_cb(message: str) -> None:
+                    self.status.emit(message)
+
+                assembler = VideoAssembler(
+                    self._config,
+                    progress_callback=_progress_cb,
+                    status_callback=_status_cb,
+                )
+                assembler.assemble(self._cut_plan, plate_data=self._plate_data)
                 self.finished.emit(str(self._config.output_path))
         except Exception as e:
             self.error.emit(str(e))
@@ -182,6 +190,7 @@ class PlateDetectionWorker(QThread):
         min_plate_px_w: int = 15,
         min_plate_px_h: int = 10,
         min_track_length: int = 1,
+        default_blur_strength: float = 1.0,
         parent=None,
     ):
         super().__init__(parent)
@@ -198,6 +207,7 @@ class PlateDetectionWorker(QThread):
         self._min_plate_px_w = min_plate_px_w
         self._min_plate_px_h = min_plate_px_h
         self._min_track_length = min_track_length
+        self._default_blur_strength = default_blur_strength
         self._cancelled = False
 
     def stop(self):
@@ -234,6 +244,11 @@ class PlateDetectionWorker(QThread):
                     tiled=self._tiled,
                     min_track_length=self._min_track_length,
                 )
+                if self._default_blur_strength != 1.0:
+                    for boxes in data.detections.values():
+                        for box in boxes:
+                            if not box.manual:
+                                box.blur_strength = self._default_blur_strength
                 results[clip_index] = data
 
             self.finished.emit(results)

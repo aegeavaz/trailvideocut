@@ -11,6 +11,7 @@ class PlateBox:
     h: float  # height
     confidence: float = 0.0
     manual: bool = False
+    blur_strength: float = 1.0
 
 
 @dataclass

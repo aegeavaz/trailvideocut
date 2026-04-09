@@ -1,7 +1,6 @@
 from pathlib import Path
 
 from PySide6.QtWidgets import (
-    QLabel,
     QMainWindow,
     QStackedWidget,
     QStatusBar,
@@ -11,7 +10,7 @@ from PySide6.QtWidgets import (
 
 from trailvideocut.audio.models import AudioAnalysis
 from trailvideocut.config import TrailVideoCutConfig, TransitionStyle
-from trailvideocut.editor.models import CutPlan, EditDecision
+from trailvideocut.editor.models import CutPlan
 from trailvideocut.ui.export_page import ExportPage
 from trailvideocut.ui.review_page import ReviewPage
 from trailvideocut.ui.setup_page import SetupPage
@@ -192,6 +191,8 @@ class MainWindow(QMainWindow):
         self._config.output_preset = render_settings.get("output_preset", "veryslow")
         self._config.output_fps = render_settings.get("output_fps", 0)
         self._config.output_threads = render_settings.get("output_threads", 0)
+        self._config.plate_blur_enabled = render_settings.get("plate_blur_enabled", True)
+        self._config.plate_blur_strength = render_settings.get("plate_blur_strength", 1.0)
 
         # Rebuild cut plan with final transition settings
         self._cut_plan = CutPlan(
@@ -207,8 +208,13 @@ class MainWindow(QMainWindow):
         self._config.davinci = is_davinci
         self._config.output_path = Path(output_path)
 
+        # Collect plate data for blur processing
+        plate_data = self._review_page.plate_data if self._config.plate_blur_enabled else None
+
         self._statusbar.showMessage("Exporting...")
-        self._render_worker = RenderWorker(self._config, self._cut_plan, parent=self)
+        self._render_worker = RenderWorker(
+            self._config, self._cut_plan, plate_data=plate_data, parent=self,
+        )
         self._render_worker.status.connect(self._on_render_status)
         self._render_worker.progress.connect(self._export_page.set_progress)
         self._render_worker.finished.connect(self._on_render_done)
