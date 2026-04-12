@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Embed plate data as OTIO clip metadata
-When exporting to DaVinci Resolve with plate blur enabled, the system SHALL embed plate detection data in each OTIO clip's `metadata` dictionary under the key `trailvideocut.plates`. The metadata SHALL contain per-frame bounding boxes with coordinates mapped to source-video frame numbers relative to the clip's source range. Each plate entry SHALL include normalized coordinates (x, y, w, h) and blur_strength.
+When exporting to DaVinci Resolve with plate blur enabled, the system SHALL embed plate detection data in each OTIO clip's `metadata` dictionary under the key `trailvideocut.plates`. The metadata SHALL contain per-frame bounding boxes with coordinates mapped to source-video frame numbers relative to the clip's source range. Each plate entry SHALL include normalized coordinates (x, y, w, h).
 
 #### Scenario: OTIO export with plate data for two clips
 - **WHEN** the user exports to DaVinci with plate data on clips 0 and 2, and plate export is enabled
@@ -12,8 +12,8 @@ When exporting to DaVinci Resolve with plate blur enabled, the system SHALL embe
 - **THEN** the OTIO file SHALL contain no plate metadata on any clip (identical to current behavior)
 
 #### Scenario: Plate metadata coordinate format
-- **WHEN** a clip has a plate detected at frame 150 with box (x=0.3, y=0.5, w=0.1, h=0.05, blur_strength=0.8)
-- **THEN** the metadata for that clip SHALL contain frame key "150" mapping to a list with one entry: `{"x": 0.3, "y": 0.5, "w": 0.1, "h": 0.05, "blur_strength": 0.8}`
+- **WHEN** a clip has a plate detected at frame 150 with box (x=0.3, y=0.5, w=0.1, h=0.05)
+- **THEN** the metadata for that clip SHALL contain frame key "150" mapping to a list with one entry: `{"x": 0.3, "y": 0.5, "w": 0.1, "h": 0.05}`
 
 ### Requirement: Map plate frame numbers to clip source ranges
 The system SHALL translate plate detection frame numbers (absolute source-video frames) to frame offsets relative to each clip's source_range start time. This mapping SHALL account for the clip's source_start time and video frame rate so that plate coordinates align with the correct frame when the OTIO timeline is imported into Resolve.
@@ -56,7 +56,7 @@ The generated Fusion composition for each clip SHALL follow this node structure:
 - **THEN** the Fusion composition SHALL have two Blur nodes, each with its own Rectangle mask; the moving plate's mask SHALL have per-frame keyframes for center position
 
 ### Requirement: Blur size auto-scaling by relative plate area
-The Fusion Blur node's XBlurSize SHALL be auto-scaled based on the plate's bounding-box area (`w × h`) relative to all plates in the clip. The smallest plate area maps to XBlurSize=1.0, the largest to XBlurSize=2.0, with linear interpolation for intermediate sizes. The per-plate `blur_strength` field is used only for inclusion/exclusion: plates with `blur_strength <= 0.0` SHALL be excluded from the composition.
+The Fusion Blur node's XBlurSize SHALL be auto-scaled based on the plate's bounding-box area (`w × h`) relative to all plates in the clip. The smallest plate area maps to XBlurSize=1.0, the largest to XBlurSize=2.0, with linear interpolation for intermediate sizes. All detected plates are included in the composition.
 
 #### Scenario: Smallest plate in clip
 - **WHEN** a plate has the smallest bounding-box area in the clip
@@ -69,10 +69,6 @@ The Fusion Blur node's XBlurSize SHALL be auto-scaled based on the plate's bound
 #### Scenario: All plates same size
 - **WHEN** all plates in the clip have the same bounding-box area
 - **THEN** all Fusion Blur nodes SHALL have XBlurSize=1.0
-
-#### Scenario: Zero blur strength excluded
-- **WHEN** a plate has blur_strength=0.0
-- **THEN** no Blur node SHALL be created for that plate in the Fusion composition
 
 ### Requirement: Export page UI controls for DaVinci plate export
 The export page SHALL include a checkbox labeled "Include plate blur data" that is visible only when the DaVinci export mode is selected. The checkbox SHALL be enabled by default when plate data exists and `plate_blur_enabled` is True. The checkbox state SHALL control whether plate metadata is embedded in the OTIO and whether the companion script is generated.

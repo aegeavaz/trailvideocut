@@ -311,26 +311,13 @@ class ReviewPage(QWidget):
         self._plate_list.currentRowChanged.connect(self._on_plate_list_selection_changed)
         plate_layout.addWidget(self._plate_list, stretch=1)
 
-        # Blur strength slider (visible when a plate is selected)
-        blur_row = QHBoxLayout()
-        blur_row.addWidget(QLabel("Blur:"))
-        self._slider_blur = QSlider(Qt.Horizontal)
-        self._slider_blur.setRange(0, 100)
-        self._slider_blur.setValue(100)
-        self._slider_blur.setToolTip("Blur intensity for the selected plate (0% = no blur, 100% = max)")
-        self._slider_blur.valueChanged.connect(self._on_blur_slider_changed)
-        blur_row.addWidget(self._slider_blur)
-        self._lbl_blur_value = QLabel("100%")
-        self._lbl_blur_value.setFixedWidth(38)
-        blur_row.addWidget(self._lbl_blur_value)
+        # Blur preview button
         self._btn_preview_blur = QPushButton("Preview Blur")
         self._btn_preview_blur.setCheckable(True)
         self._btn_preview_blur.setEnabled(False)
         self._btn_preview_blur.setToolTip("Toggle blur preview on the video overlay")
         self._btn_preview_blur.toggled.connect(self._on_toggle_blur_preview)
-        blur_row.addWidget(self._btn_preview_blur)
-        self._slider_blur.setEnabled(False)
-        plate_layout.addLayout(blur_row)
+        plate_layout.addWidget(self._btn_preview_blur)
 
         # Plate detection progress (always in layout to avoid resize)
         self._plate_progress_bar = QProgressBar()
@@ -428,24 +415,8 @@ class ReviewPage(QWidget):
                 self._chk_show_plates.setEnabled(True)
                 self._btn_add_plate.setEnabled(True)
                 self._btn_clear_plates.setEnabled(True)
-                # Check if plates were detected with the current decoder
-                from trailvideocut.plate.storage import get_plates_path
-                import json as _json
-                _sidecar = get_plates_path(video_path)
-                _needs_redetect = True
-                try:
-                    _meta = _json.loads(_sidecar.read_text(encoding="utf-8"))
-                    _needs_redetect = _meta.get("decoder") != "ffmpeg"
-                except Exception:
-                    pass
-                if _needs_redetect:
-                    self._lbl_plate_status.setText(
-                        "Plates loaded (old detector — re-detect for accurate blur)"
-                    )
-                    self._lbl_plate_status.setStyleSheet("color: #ff9800;")
-                else:
-                    self._lbl_plate_status.setText("Plates loaded from disk")
-                    self._lbl_plate_status.setStyleSheet("")
+                self._lbl_plate_status.setText("Plates loaded from disk")
+                self._lbl_plate_status.setStyleSheet("")
                 self._plate_overlay.setVisible(self._chk_show_plates.isChecked())
                 self._sync_overlay_to_current_clip()
 
@@ -1290,7 +1261,6 @@ class ReviewPage(QWidget):
     def _on_plate_selection_changed(self):
         """Sync overlay selection state to the plate list widget."""
         self._refresh_plate_list()
-        self._sync_blur_slider()
 
     def _on_plate_box_changed(self):
         """Handle box modification (add/move/resize/delete) — refresh list and save."""
@@ -1298,29 +1268,6 @@ class ReviewPage(QWidget):
         self._save_plates()
         if self._btn_preview_blur.isChecked():
             self._update_blur_preview()
-
-    def _sync_blur_slider(self):
-        """Update blur slider to reflect the currently selected plate's blur_strength."""
-        box = self._plate_overlay.selected_box()
-        if box is not None:
-            self._slider_blur.setEnabled(True)
-            self._slider_blur.blockSignals(True)
-            self._slider_blur.setValue(int(box.blur_strength * 100))
-            self._slider_blur.blockSignals(False)
-            self._lbl_blur_value.setText(f"{int(box.blur_strength * 100)}%")
-        else:
-            self._slider_blur.setEnabled(False)
-
-    def _on_blur_slider_changed(self, value: int):
-        """Update the selected plate's blur_strength from the slider."""
-        box = self._plate_overlay.selected_box()
-        if box is not None:
-            box.blur_strength = value / 100.0
-            self._lbl_blur_value.setText(f"{value}%")
-            self._save_plates()
-            self._plate_overlay.update()
-            if self._btn_preview_blur.isChecked():
-                self._update_blur_preview()
 
     # --- Blur Preview ---
 
@@ -1381,8 +1328,6 @@ class ReviewPage(QWidget):
 
         tiles = []
         for box in boxes:
-            if box.blur_strength <= 0.0:
-                continue
             x1 = max(0, int(box.x * fw))
             y1 = max(0, int(box.y * fh))
             x2 = min(fw, int((box.x + box.w) * fw))
@@ -1636,4 +1581,3 @@ class ReviewPage(QWidget):
         if self._plate_list_updating:
             return
         self._plate_overlay.select_box(row)
-        self._sync_blur_slider()

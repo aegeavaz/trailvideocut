@@ -15,38 +15,23 @@ The system SHALL apply Gaussian blur to all detected plate bounding box regions 
 - **WHEN** the user exports a video with plate data available but `plate_blur_enabled` is set to `False`
 - **THEN** the export SHALL proceed without applying any plate blur
 
-### Requirement: Per-plate blur strength control
-Each `PlateBox` SHALL have a `blur_strength` field (float, 0.0 to 1.0) that controls the intensity of the Gaussian blur applied to that plate region. A value of 0.0 SHALL mean no blur; 1.0 SHALL mean maximum blur. The default value SHALL be 1.0.
+### Requirement: Automatic blur strength based on plate dimensions
+Blur intensity SHALL be determined automatically from the plate's pixel dimensions. There is no per-plate or global blur strength setting. All detected plates are blurred; to exclude a plate the user deletes the detection. `TrailVideoCutConfig` SHALL include a `plate_blur_enabled` field (bool, default True) that acts as a master toggle.
 
-#### Scenario: Plate with full blur strength
-- **WHEN** a plate has `blur_strength=1.0` and the plate region is 80x40 pixels
-- **THEN** the system SHALL apply a Gaussian blur with a kernel size proportional to the plate dimensions, rendering the plate content unreadable
-
-#### Scenario: Plate with partial blur strength
-- **WHEN** a plate has `blur_strength=0.5`
-- **THEN** the system SHALL apply a Gaussian blur with half the maximum kernel size, partially obscuring the plate content
-
-#### Scenario: Plate with zero blur strength
-- **WHEN** a plate has `blur_strength=0.0`
-- **THEN** the system SHALL skip blur for that plate, leaving it unmodified in the export
-
-### Requirement: Global default blur strength configuration
-`TrailVideoCutConfig` SHALL include a `plate_blur_strength` field (float, 0.0 to 1.0, default 1.0) that serves as the default blur strength for newly detected plates. It SHALL also include a `plate_blur_enabled` field (bool, default True) that acts as a master toggle.
-
-#### Scenario: New plate inherits global default
-- **WHEN** a plate is detected with the global `plate_blur_strength` set to 0.7
-- **THEN** the plate's `blur_strength` SHALL be initialized to 0.7
+#### Scenario: All detected plates are blurred
+- **WHEN** a frame has 3 detected plates of different sizes
+- **THEN** the system SHALL apply Gaussian blur to all 3 plates, with kernel sizes proportional to each plate's dimensions
 
 #### Scenario: Global blur disabled skips all blur
 - **WHEN** `plate_blur_enabled` is `False` and plate data exists
-- **THEN** the export SHALL not apply any blur regardless of individual plate `blur_strength` values
+- **THEN** the export SHALL not apply any blur
 
 ### Requirement: Apply blur during MoviePy composition with calibrated frame mapping
 The system SHALL apply blur per-frame using MoviePy's `transform()` function during video composition. Before applying blur to a clip, the system SHALL calibrate the frame offset by comparing MoviePy's first decoded frame against source frames (content-based MSE matching). Segments without plate data SHALL pass through unchanged.
 
 #### Scenario: Mixed segments with and without plates
 - **WHEN** a cut plan has 5 segments and only segments 1 and 3 have plate data
-- **THEN** only segments 1 and 3 SHALL have blur applied via transform; segments 0, 2, and 4 SHALL render without blur processing
+- **THEN** only segments 1 and 3 SHALL have blur applied; segments 0, 2, and 4 SHALL render without blur processing
 
 #### Scenario: Drift-tolerant blur boxes
 - **WHEN** blur is applied to a frame and the plate moves between adjacent frames
@@ -60,12 +45,12 @@ The system SHALL report blur processing progress to the user via the existing pr
 - **THEN** the progress callback SHALL be invoked periodically with the current frame count and total frame count
 
 ### Requirement: Blur kernel size scales with plate dimensions
-The Gaussian blur kernel size SHALL scale with the plate's pixel dimensions to ensure consistent visual blur regardless of plate size. The formula SHALL be: `kernel_size = max(3, int(blur_strength * min(plate_pixel_w, plate_pixel_h)))`, ensuring the kernel is always odd.
+The Gaussian blur kernel size SHALL scale automatically with the plate's pixel dimensions. The formula SHALL be: `kernel_size = max(3, min(plate_pixel_w, plate_pixel_h))`, ensuring the kernel is always odd. Larger plates get proportionally stronger blur so the content is fully obscured.
 
 #### Scenario: Large plate gets large kernel
-- **WHEN** a plate region is 200x100 pixels with `blur_strength=1.0`
-- **THEN** the Gaussian kernel size SHALL be approximately 99 (odd, scaled from min dimension 100)
+- **WHEN** a plate region is 200x100 pixels
+- **THEN** the Gaussian kernel size SHALL be 99 (odd, scaled from min dimension 100)
 
 #### Scenario: Small plate gets small kernel
-- **WHEN** a plate region is 40x20 pixels with `blur_strength=1.0`
-- **THEN** the Gaussian kernel size SHALL be approximately 19 (odd, scaled from min dimension 20)
+- **WHEN** a plate region is 40x20 pixels
+- **THEN** the Gaussian kernel size SHALL be 19 (odd, scaled from min dimension 20)

@@ -12,8 +12,7 @@ Covers OpenSpec `export-plates-davinci-resolve` tasks 6.1, 6.2, and 6.4:
   metadata both derive their dicts from the same helper, so they are
   byte-identical for the same input.  This is a guardrail against
   future drift.
-- 6.2c Zero-blur-strength filtering: boxes with ``blur_strength <= 0``
-  are dropped from both paths.
+- 6.2c All boxes are included (blur strength is auto-scaled from plate area).
 - 6.4 WSL path handling: `generate_resolve_script()` converts
   `/mnt/c/...` paths to Windows form so the generated Python works when
   executed by DaVinci Resolve on the Windows host.
@@ -108,50 +107,35 @@ class TestBuildClipDetections:
         # Absolute 100 -> relative 0, 105 -> 5, 109 -> 9.
         assert sorted(result.keys(), key=int) == ["0", "5", "9"]
 
-    def test_zero_blur_strength_dropped(self):
+    def test_all_boxes_included(self):
         cpd = ClipPlateData(
             clip_index=0,
             detections={
                 5: [
-                    PlateBox(0.1, 0.2, 0.05, 0.03, blur_strength=1.0),
-                    PlateBox(0.5, 0.5, 0.05, 0.03, blur_strength=0.0),  # dropped
+                    PlateBox(0.1, 0.2, 0.05, 0.03),
+                    PlateBox(0.5, 0.5, 0.05, 0.03),
                 ],
             },
         )
         result = _build_clip_detections(cpd, src_start_frame=0, src_end_frame=10)
-        assert len(result["5"]) == 1
-        assert result["5"][0]["x"] == 0.1
+        assert len(result["5"]) == 2
 
     def test_values_are_floats(self):
         """JSON-serialisable output — all numeric fields are Python float."""
         cpd = ClipPlateData(
             clip_index=0,
             detections={
-                5: [PlateBox(0.1, 0.2, 0.05, 0.03, blur_strength=0.7)],
+                5: [PlateBox(0.1, 0.2, 0.05, 0.03)],
             },
         )
         result = _build_clip_detections(cpd, src_start_frame=0, src_end_frame=10)
         box = result["5"][0]
-        for key in ("x", "y", "w", "h", "blur_strength"):
+        for key in ("x", "y", "w", "h"):
             assert isinstance(box[key], float), f"{key} is not a float: {type(box[key])}"
 
     def test_empty_detections_returns_empty_dict(self):
         cpd = ClipPlateData(clip_index=0, detections={})
         assert _build_clip_detections(cpd, 0, 100) == {}
-
-    def test_all_frames_filtered_out_returns_empty_dict_at_keys(self):
-        """If every box has blur_strength=0, the entry is an empty list
-        (not absent).  Preserves the exact pre-refactor behaviour for the
-        downstream generator, which tolerates empty lists as no-ops.
-        """
-        cpd = ClipPlateData(
-            clip_index=0,
-            detections={
-                5: [PlateBox(0.1, 0.2, 0.05, 0.03, blur_strength=0.0)],
-            },
-        )
-        result = _build_clip_detections(cpd, src_start_frame=0, src_end_frame=10)
-        assert result == {"5": []}
 
 
 # ---------------------------------------------------------------------------
@@ -312,8 +296,8 @@ class TestSchemaParity:
         cpd = ClipPlateData(
             clip_index=0,
             detections={
-                10: [PlateBox(0.10, 0.20, 0.05, 0.03, blur_strength=0.5)],
-                11: [PlateBox(0.12, 0.22, 0.05, 0.03, blur_strength=0.5)],
+                10: [PlateBox(0.10, 0.20, 0.05, 0.03)],
+                11: [PlateBox(0.12, 0.22, 0.05, 0.03)],
             },
         )
         fusion_dict = _build_clip_detections(cpd, 10, 12)
@@ -323,7 +307,7 @@ class TestSchemaParity:
         for d in (fusion_dict, otio_dict):
             for boxes in d.values():
                 for box in boxes:
-                    for key in ("x", "y", "w", "h", "blur_strength"):
+                    for key in ("x", "y", "w", "h"):
                         assert type(box[key]) is float
 
 

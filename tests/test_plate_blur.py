@@ -12,32 +12,25 @@ from trailvideocut.plate.models import ClipPlateData, PlateBox
 
 
 class TestBlurKernelSize:
-    def test_full_strength_uses_min_dimension(self):
-        k = _blur_kernel_size(1.0, 100, 40)
+    def test_uses_min_dimension(self):
+        k = _blur_kernel_size(100, 40)
         # min(100,40)=40, max(3,40)=40, even->41
         assert k == 41
 
-    def test_half_strength(self):
-        k = _blur_kernel_size(0.5, 100, 40)
-        # 0.5*40=20, max(3,20)=20, even->21
-        assert k == 21
-
-    def test_zero_strength_returns_zero(self):
-        assert _blur_kernel_size(0.0, 100, 40) == 0
-
-    def test_negative_strength_returns_zero(self):
-        assert _blur_kernel_size(-0.5, 100, 40) == 0
-
     def test_tiny_plate_minimum_kernel(self):
-        k = _blur_kernel_size(0.01, 10, 5)
-        # 0.01*5=0, max(3,0)=3
+        k = _blur_kernel_size(10, 5)
+        # min(10,5)=5, max(3,5)=5, odd->5
+        assert k == 5
+
+    def test_very_small_plate_floor(self):
+        k = _blur_kernel_size(2, 1)
+        # min(2,1)=1, max(3,1)=3
         assert k == 3
 
     def test_result_always_odd(self):
-        for strength in [0.1, 0.25, 0.5, 0.75, 1.0]:
-            k = _blur_kernel_size(strength, 80, 60)
-            if k > 0:
-                assert k % 2 == 1
+        for w, h in [(80, 60), (50, 50), (100, 30), (7, 7)]:
+            k = _blur_kernel_size(w, h)
+            assert k % 2 == 1
 
 
 class TestApplyBlurToFrame:
@@ -55,20 +48,11 @@ class TestApplyBlurToFrame:
         frame = self._make_frame()
         original_region = frame[20:40, 40:120].copy()
 
-        box = PlateBox(x=0.2, y=0.2, w=0.4, h=0.2, blur_strength=1.0)
+        box = PlateBox(x=0.2, y=0.2, w=0.4, h=0.2)
         result = apply_blur_to_frame(frame, [box])
 
         # The blurred region should differ from original checkerboard
         assert not np.array_equal(result[20:40, 40:120], original_region)
-
-    def test_zero_strength_leaves_frame_unchanged(self):
-        frame = self._make_frame()
-        original = frame.copy()
-
-        box = PlateBox(x=0.2, y=0.2, w=0.4, h=0.2, blur_strength=0.0)
-        result = apply_blur_to_frame(frame, [box])
-
-        np.testing.assert_array_equal(result, original)
 
     def test_no_boxes_leaves_frame_unchanged(self):
         frame = self._make_frame()
@@ -83,8 +67,8 @@ class TestApplyBlurToFrame:
         original = frame.copy()
 
         boxes = [
-            PlateBox(x=0.025, y=0.05, w=0.125, h=0.1, blur_strength=1.0),
-            PlateBox(x=0.5, y=0.5, w=0.25, h=0.15, blur_strength=0.5),
+            PlateBox(x=0.025, y=0.05, w=0.125, h=0.1),
+            PlateBox(x=0.5, y=0.5, w=0.25, h=0.15),
         ]
         result = apply_blur_to_frame(frame, boxes)
 
@@ -95,13 +79,13 @@ class TestApplyBlurToFrame:
     def test_clamped_to_frame_bounds(self):
         frame = self._make_frame(100, 200)
         # Box extends beyond frame edges
-        box = PlateBox(x=0.9, y=0.9, w=0.2, h=0.2, blur_strength=1.0)
+        box = PlateBox(x=0.9, y=0.9, w=0.2, h=0.2)
         # Should not raise
         apply_blur_to_frame(frame, [box])
 
     def test_returns_same_frame_object(self):
         frame = self._make_frame()
-        box = PlateBox(x=0.2, y=0.2, w=0.4, h=0.2, blur_strength=1.0)
+        box = PlateBox(x=0.2, y=0.2, w=0.4, h=0.2)
         result = apply_blur_to_frame(frame, [box])
         assert result is frame
 
@@ -236,18 +220,6 @@ class TestExpandBoxesForDrift:
 
         result = expand_boxes_for_drift({}, 10)
         assert result == []
-
-    def test_preserves_blur_strength(self):
-        """Expanded box keeps the original blur_strength."""
-        from trailvideocut.plate.blur import expand_boxes_for_drift
-
-        detections = {
-            10: [PlateBox(x=0.50, y=0.30, w=0.02, h=0.02, blur_strength=0.7)],
-            11: [PlateBox(x=0.52, y=0.30, w=0.02, h=0.02)],
-        }
-        result = expand_boxes_for_drift(detections, 10)
-        assert result[0].blur_strength == 0.7
-
 
 class TestCalibrateFrameOffset:
     """Tests for calibrate_frame_offset()."""

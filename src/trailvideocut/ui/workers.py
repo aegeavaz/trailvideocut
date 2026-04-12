@@ -190,7 +190,6 @@ class PlateDetectionWorker(QThread):
         min_plate_px_w: int = 15,
         min_plate_px_h: int = 10,
         min_track_length: int = 1,
-        default_blur_strength: float = 1.0,
         parent=None,
     ):
         super().__init__(parent)
@@ -207,7 +206,6 @@ class PlateDetectionWorker(QThread):
         self._min_plate_px_w = min_plate_px_w
         self._min_plate_px_h = min_plate_px_h
         self._min_track_length = min_track_length
-        self._default_blur_strength = default_blur_strength
         self._cancelled = False
 
     def stop(self):
@@ -244,11 +242,6 @@ class PlateDetectionWorker(QThread):
                     tiled=self._tiled,
                     min_track_length=self._min_track_length,
                 )
-                if self._default_blur_strength != 1.0:
-                    for boxes in data.detections.values():
-                        for box in boxes:
-                            if not box.manual:
-                                box.blur_strength = self._default_blur_strength
                 results[clip_index] = data
 
             self.finished.emit(results)

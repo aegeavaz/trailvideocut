@@ -155,9 +155,8 @@ def _build_clip_detections(
 
     Keeps only detections whose absolute source-video frame number falls in
     the half-open interval ``[src_start_frame, src_end_frame)``, shifts the
-    frame numbers to clip-relative (``frame_num - src_start_frame``), drops
-    boxes whose ``blur_strength <= 0``, and casts all numeric fields to
-    ``float`` so the result is JSON-serialisable.
+    frame numbers to clip-relative (``frame_num - src_start_frame``), and
+    casts all numeric fields to ``float`` so the result is JSON-serialisable.
 
     Used by both the Fusion Lua generator and the OTIO metadata embedding
     so the two payloads cannot drift.
@@ -173,10 +172,8 @@ def _build_clip_detections(
                 "y": float(b.y),
                 "w": float(b.w),
                 "h": float(b.h),
-                "blur_strength": float(b.blur_strength),
             }
             for b in boxes
-            if b.blur_strength > 0.0
         ]
     return result
 

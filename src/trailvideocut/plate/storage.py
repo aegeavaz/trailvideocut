@@ -43,7 +43,6 @@ def save_plates(
                     "h": float(b.h),
                     "confidence": float(b.confidence),
                     "manual": bool(b.manual),
-                    "blur_strength": float(b.blur_strength),
                 }
                 for b in boxes
             ]
@@ -104,7 +103,6 @@ def load_plates(
                         h=float(b["h"]),
                         confidence=float(b.get("confidence", 0.0)),
                         manual=bool(b.get("manual", False)),
-                        blur_strength=float(b.get("blur_strength", 1.0)),
                     )
                 )
             if boxes:

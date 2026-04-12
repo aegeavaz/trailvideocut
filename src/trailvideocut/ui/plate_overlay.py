@@ -355,22 +355,6 @@ class PlateOverlayWidget(QWidget):
             painter.setPen(pen)
             painter.drawRect(rect)
 
-            # Blur % label for non-default blur_strength
-            if box.blur_strength < 0.99:
-                pct = f"{int(box.blur_strength * 100)}%"
-                painter.setFont(label_font)
-                # Background pill
-                fm = painter.fontMetrics()
-                tw = fm.horizontalAdvance(pct) + 6
-                th = fm.height() + 2
-                lx = rect.right() - tw - 2
-                ly = rect.top() + 2
-                painter.setPen(Qt.NoPen)
-                painter.setBrush(QColor(0, 0, 0, 160))
-                painter.drawRoundedRect(QRectF(lx, ly, tw, th), 3, 3)
-                painter.setPen(QColor(255, 255, 255))
-                painter.drawText(QRectF(lx, ly, tw, th), Qt.AlignCenter, pct)
-
             # Resize handles for selected box
             if selected:
                 self._draw_handles(painter, rect)

@@ -45,8 +45,8 @@ The system SHALL use OpenCV (`cv2.VideoCapture`) to read the current video frame
 The blur preview SHALL apply the same `cv2.GaussianBlur` with the same kernel size calculation as the export pipeline, ensuring visual consistency between preview and final output.
 
 #### Scenario: Preview matches export blur
-- **WHEN** a plate has `blur_strength=0.7` and the preview shows a blurred region
-- **THEN** the blur appearance SHALL be visually identical to the same plate in the exported video
+- **WHEN** a plate region is visible in the preview with blur enabled
+- **THEN** the blur appearance SHALL be visually identical to the same plate in the exported video (auto-scaled kernel based on plate dimensions)
 
 ### Requirement: Blurred regions rendered as QPixmap tiles on overlay
 The `PlateOverlayWidget` SHALL store blurred plate regions as `QPixmap` tiles and paint them in `paintEvent()` at the correct normalized positions. The pixmaps SHALL be painted before the bounding box outlines so boxes remain visible on top of the blur.
@@ -55,10 +55,6 @@ The `PlateOverlayWidget` SHALL store blurred plate regions as `QPixmap` tiles an
 - **WHEN** a plate at normalized position (0.4, 0.2, 0.1, 0.05) is blurred
 - **THEN** the blurred QPixmap SHALL be painted at the same widget-pixel position as the bounding box, covering the plate region exactly
 
-#### Scenario: Blur respects per-plate blur strength
-- **WHEN** plate A has `blur_strength=0.3` and plate B has `blur_strength=1.0`
-- **THEN** the preview SHALL show plate A with light blur and plate B with heavy blur
-
-#### Scenario: Plate with blur_strength=0.0 not blurred in preview
-- **WHEN** a plate has `blur_strength=0.0` and blur preview is enabled
-- **THEN** no blurred pixmap SHALL be painted for that plate
+#### Scenario: Blur intensity proportional to plate size
+- **WHEN** plate A is 40x20 pixels and plate B is 200x100 pixels
+- **THEN** the preview SHALL show plate B with a stronger blur kernel than plate A, matching the automatic area-based scaling used in export

@@ -113,21 +113,6 @@ class ExportPage(QWidget):
         self._chk_blur_enabled.setToolTip("Apply Gaussian blur to detected plate regions in the exported video")
         blur_layout.addRow(self._chk_blur_enabled)
 
-        blur_strength_row = QHBoxLayout()
-        self._slider_blur_default = QSlider(Qt.Horizontal)
-        self._slider_blur_default.setRange(0, 100)
-        self._slider_blur_default.setValue(100)
-        self._slider_blur_default.setToolTip("Default blur intensity for plates (0% = no blur, 100% = max)")
-        blur_strength_row.addWidget(self._slider_blur_default)
-        self._lbl_blur_default = QLabel("100%")
-        self._lbl_blur_default.setFixedWidth(38)
-        blur_strength_row.addWidget(self._lbl_blur_default)
-        self._slider_blur_default.valueChanged.connect(
-            lambda v: self._lbl_blur_default.setText(f"{v}%")
-        )
-        blur_layout.addRow("Default strength:", blur_strength_row)
-
-        self._chk_blur_enabled.toggled.connect(self._slider_blur_default.setEnabled)
 
         # DaVinci-specific plate blur options (visible only in DaVinci mode)
         self._chk_resolve_plates = QCheckBox("Include plate blur data in OTIO")
@@ -299,7 +284,7 @@ class ExportPage(QWidget):
             "output_fps": self._output_fps.value(),
             "output_threads": self._threads.value(),
             "plate_blur_enabled": self._chk_blur_enabled.isChecked() if not is_davinci else resolve_plates,
-            "plate_blur_strength": self._slider_blur_default.value() / 100.0,
+
             "resolve_apply_blur": resolve_plates and self._chk_resolve_auto.isChecked(),
         }
 

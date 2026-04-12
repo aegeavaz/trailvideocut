@@ -42,7 +42,7 @@ def _make_detections(boxes_at: dict[int, dict]) -> dict[str, list[dict]]:
     `boxes_at` maps frame_number -> a single box dict.
     """
     return {
-        str(frame): [box | {"blur_strength": box.get("blur_strength", 1.0)}]
+        str(frame): [box]
         for frame, box in boxes_at.items()
     }
 
@@ -420,8 +420,8 @@ class TestRelativeBlurSize:
         # _group_into_tracks splits them because centers are far apart.
         detections = {
             "0": [
-                {"x": 0.05, "y": 0.05, "w": 0.05, "h": 0.05, "blur_strength": 1.0},
-                {"x": 0.80, "y": 0.80, "w": 0.10, "h": 0.10, "blur_strength": 1.0},
+                {"x": 0.05, "y": 0.05, "w": 0.05, "h": 0.05},
+                {"x": 0.80, "y": 0.80, "w": 0.10, "h": 0.10},
             ],
         }
         script = _generate_lua_script_for_clip(
@@ -441,11 +441,11 @@ class TestRelativeBlurSize:
         detections = {
             "0": [
                 # Small: area = 0.04*0.04 = 0.0016
-                {"x": 0.05, "y": 0.05, "w": 0.04, "h": 0.04, "blur_strength": 1.0},
+                {"x": 0.05, "y": 0.05, "w": 0.04, "h": 0.04},
                 # Medium: area = 0.04*0.08 = 0.0032 (midpoint)
-                {"x": 0.40, "y": 0.40, "w": 0.04, "h": 0.08, "blur_strength": 1.0},
+                {"x": 0.40, "y": 0.40, "w": 0.04, "h": 0.08},
                 # Large: area = 0.08*0.06 = 0.0048
-                {"x": 0.80, "y": 0.80, "w": 0.08, "h": 0.06, "blur_strength": 1.0},
+                {"x": 0.80, "y": 0.80, "w": 0.08, "h": 0.06},
             ],
         }
         script = _generate_lua_script_for_clip(
@@ -487,8 +487,8 @@ class TestRelativeBlurSize:
         """Degenerate case: all plates same area -> no division by zero, all 1.0."""
         detections = {
             "0": [
-                {"x": 0.1, "y": 0.1, "w": 0.05, "h": 0.05, "blur_strength": 1.0},
-                {"x": 0.8, "y": 0.8, "w": 0.05, "h": 0.05, "blur_strength": 1.0},
+                {"x": 0.1, "y": 0.1, "w": 0.05, "h": 0.05},
+                {"x": 0.8, "y": 0.8, "w": 0.05, "h": 0.05},
             ],
         }
         script = _generate_lua_script_for_clip(

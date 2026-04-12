@@ -123,21 +123,18 @@ def expand_boxes_for_drift(
             h=y_max - y_min,
             confidence=box.confidence,
             manual=box.manual,
-            blur_strength=box.blur_strength,
         ))
 
     return result
 
 
-def _blur_kernel_size(blur_strength: float, plate_px_w: int, plate_px_h: int) -> int:
-    """Compute Gaussian kernel size from blur strength and plate pixel dimensions.
+def _blur_kernel_size(plate_px_w: int, plate_px_h: int) -> int:
+    """Compute Gaussian kernel size from plate pixel dimensions.
 
-    Returns an odd integer >= 3, or 0 if blur_strength is effectively zero.
+    Returns an odd integer >= 3.  Larger plates get a proportionally
+    larger kernel so the blur fully obscures the content.
     """
-    if blur_strength <= 0.0:
-        return 0
-    raw = int(blur_strength * min(plate_px_w, plate_px_h))
-    k = max(3, raw)
+    k = max(3, min(plate_px_w, plate_px_h))
     # Gaussian kernel must be odd
     if k % 2 == 0:
         k += 1
@@ -157,7 +154,7 @@ def apply_blur_to_frame(
     frame : np.ndarray
         BGR image (H, W, 3). Modified in-place and returned.
     boxes : list[PlateBox]
-        Plate boxes with normalized coordinates and blur_strength.
+        Plate boxes with normalized coordinates.
     frame_h, frame_w : int, optional
         Override frame dimensions (defaults to frame.shape).
 
@@ -172,9 +169,6 @@ def apply_blur_to_frame(
         frame_w = frame.shape[1]
 
     for box in boxes:
-        if box.blur_strength <= 0.0:
-            continue
-
         # Convert normalized coords to pixel coords, clamped to frame bounds
         x1 = max(0, int(box.x * frame_w))
         y1 = max(0, int(box.y * frame_h))
@@ -186,9 +180,7 @@ def apply_blur_to_frame(
         if pw < 2 or ph < 2:
             continue
 
-        k = _blur_kernel_size(box.blur_strength, pw, ph)
-        if k < 3:
-            continue
+        k = _blur_kernel_size(pw, ph)
 
         frame[y1:y2, x1:x2] = cv2.GaussianBlur(
             frame[y1:y2, x1:x2], (k, k), 0
@@ -240,8 +232,7 @@ def _detect_near_stored(
     region centered on the stored position, upscales to
     *model_size*×*model_size*, and runs single-pass detection.
 
-    Returns re-detected boxes in **full-frame normalized coordinates**,
-    with ``blur_strength`` preserved from the matching stored box.
+    Returns re-detected boxes in **full-frame normalized coordinates**.
     Manual boxes are returned as-is (user positioned them intentionally).
     """
     fh, fw = frame.shape[:2]
@@ -293,7 +284,6 @@ def _detect_near_stored(
                     x=fb_x, y=fb_y, w=fb_w, h=fb_h,
                     confidence=fb.confidence,
                     manual=False,
-                    blur_strength=sbox.blur_strength,
                 )
 
         result.append(best_box if best_box else sbox)

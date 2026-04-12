@@ -51,7 +51,6 @@ class TrailVideoCutConfig:
 
     # Plate blur
     plate_blur_enabled: bool = True
-    plate_blur_strength: float = 1.0
 
     # Output
     output_fps: float = 0
