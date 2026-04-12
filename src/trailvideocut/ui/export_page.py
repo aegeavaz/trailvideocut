@@ -129,6 +129,33 @@ class ExportPage(QWidget):
 
         self._chk_blur_enabled.toggled.connect(self._slider_blur_default.setEnabled)
 
+        # DaVinci-specific plate blur options (visible only in DaVinci mode)
+        self._chk_resolve_plates = QCheckBox("Include plate blur data in OTIO")
+        self._chk_resolve_plates.setChecked(True)
+        self._chk_resolve_plates.setToolTip(
+            "Embed plate bounding boxes in the OTIO file and generate "
+            "a companion script to apply blur in DaVinci Resolve"
+        )
+        blur_layout.addRow(self._chk_resolve_plates)
+
+        self._chk_resolve_auto = QCheckBox("Auto-apply in Resolve")
+        self._chk_resolve_auto.setChecked(True)
+        self._chk_resolve_auto.setToolTip(
+            "Automatically connect to a running DaVinci Resolve Studio instance "
+            "and apply Fusion blur compositions (requires Resolve Studio with "
+            "external scripting enabled)"
+        )
+        blur_layout.addRow(self._chk_resolve_auto)
+
+        self._chk_resolve_plates.toggled.connect(self._chk_resolve_auto.setEnabled)
+        self._chk_blur_enabled.toggled.connect(self._chk_resolve_plates.setEnabled)
+
+        # Initially hide DaVinci-specific options
+        self._chk_resolve_plates.setVisible(False)
+        self._chk_resolve_auto.setVisible(False)
+
+        self._radio_davinci.toggled.connect(self._update_resolve_options_visibility)
+
         root.addWidget(blur_group)
 
         # Output path
@@ -227,8 +254,23 @@ class ExportPage(QWidget):
     def set_finished(self, output_path: str):
         self._progress_bar.setVisible(False)
         self._btn_start.setEnabled(True)
-        self._status_label.setText(f"Export complete: {output_path}")
-        self._status_label.setStyleSheet("color: #4CAF50; padding: 4px; font-weight: bold;")
+        msg = f"Export complete: {output_path}"
+        style = "color: #4CAF50; padding: 4px; font-weight: bold;"
+        # Check if companion Fusion scripts were generated
+        if output_path.endswith(".otio"):
+            fusion_dir = Path(output_path).with_name(
+                Path(output_path).stem + "_fusion",
+            )
+            if fusion_dir.is_dir():
+                count = len(list(fusion_dir.glob("*.lua")))
+                if count:
+                    msg += (
+                        f"\nFusion blur scripts: {fusion_dir.name}/ ({count} file(s))"
+                        f"\n  Usage: select clip > Fusion > Console > "
+                        f"dofile('path/to/script.lua')"
+                    )
+        self._status_label.setText(msg)
+        self._status_label.setStyleSheet(style)
 
     def set_error(self, message: str):
         self._progress_bar.setVisible(False)
@@ -236,16 +278,29 @@ class ExportPage(QWidget):
         self._status_label.setText(f"Error: {message}")
         self._status_label.setStyleSheet("color: #f44336; padding: 4px;")
 
+    def _update_resolve_options_visibility(self):
+        """Show/hide DaVinci Resolve plate blur options based on format."""
+        is_davinci = self._radio_davinci.isChecked()
+        self._chk_resolve_plates.setVisible(is_davinci)
+        self._chk_resolve_auto.setVisible(is_davinci)
+
     def get_render_settings(self) -> dict:
         """Return current render settings as a dict."""
+        is_davinci = self._radio_davinci.isChecked()
+        resolve_plates = (
+            is_davinci
+            and self._chk_blur_enabled.isChecked()
+            and self._chk_resolve_plates.isChecked()
+        )
         return {
             "transition_style": self._transition.currentText(),
             "crossfade_duration": self._crossfade_dur.value(),
             "output_preset": self._preset.currentText(),
             "output_fps": self._output_fps.value(),
             "output_threads": self._threads.value(),
-            "plate_blur_enabled": self._chk_blur_enabled.isChecked(),
+            "plate_blur_enabled": self._chk_blur_enabled.isChecked() if not is_davinci else resolve_plates,
             "plate_blur_strength": self._slider_blur_default.value() / 100.0,
+            "resolve_apply_blur": resolve_plates and self._chk_resolve_auto.isChecked(),
         }
 
     def reset_status(self):

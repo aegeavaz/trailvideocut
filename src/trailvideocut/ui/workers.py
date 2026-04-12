@@ -146,7 +146,7 @@ class RenderWorker(QThread):
 
                 self.status.emit("Exporting OTIO timeline...")
                 exporter = DaVinciExporter(self._config)
-                path = exporter.export(self._cut_plan)
+                path = exporter.export(self._cut_plan, plate_data=self._plate_data)
                 self.finished.emit(str(path))
             else:
                 self.status.emit("Assembling video with FFmpeg...")

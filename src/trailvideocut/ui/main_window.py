@@ -193,6 +193,7 @@ class MainWindow(QMainWindow):
         self._config.output_threads = render_settings.get("output_threads", 0)
         self._config.plate_blur_enabled = render_settings.get("plate_blur_enabled", True)
         self._config.plate_blur_strength = render_settings.get("plate_blur_strength", 1.0)
+        self._config.resolve_apply_blur = render_settings.get("resolve_apply_blur", True)
 
         # Rebuild cut plan with final transition settings
         self._cut_plan = CutPlan(

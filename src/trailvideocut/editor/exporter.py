@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+import logging
+import subprocess
 from pathlib import Path
 
 import opentimelineio as otio
@@ -6,8 +10,10 @@ from rich.console import Console
 from trailvideocut.config import TrailVideoCutConfig, TransitionStyle
 from trailvideocut.editor.keyframes import probe_video_params
 from trailvideocut.editor.models import CutPlan
+from trailvideocut.plate.models import ClipPlateData
 
 console = Console()
+logger = logging.getLogger(__name__)
 
 
 class DaVinciExporter:
@@ -16,18 +22,25 @@ class DaVinciExporter:
     def __init__(self, config: TrailVideoCutConfig):
         self.config = config
 
-    def export(self, plan: CutPlan) -> Path:
+    def export(
+        self,
+        plan: CutPlan,
+        plate_data: dict[int, ClipPlateData] | None = None,
+    ) -> Path:
         video_path = self.config.video_path
         vparams = probe_video_params(str(video_path))
 
         r_frame_rate = vparams.get("r_frame_rate", "24000/1001")
         video_duration = vparams.get("duration", 0.0)
         timecode = vparams.get("timecode")
+        fps = _parse_frame_rate(r_frame_rate)
 
         otio_path = self.config.output_path
         timeline = _generate_otio_timeline(
             plan, video_path, video_duration,
             self.config.audio_path, r_frame_rate, timecode,
+            plate_data=plate_data if self.config.plate_blur_enabled else None,
+            fps=fps,
         )
         timeline.to_json_file(str(otio_path))
         console.print(f"  OTIO: {otio_path}")
@@ -35,6 +48,72 @@ class DaVinciExporter:
         if plan.transition_style == TransitionStyle.CROSSFADE.value and len(plan.decisions) > 1:
             transition_info = f" with {plan.crossfade_duration}s crossfades"
         console.print(f"  {len(plan.decisions)} segments referenced from source video{transition_info}")
+
+        # Generate companion files if plate data exists
+        has_plates = plate_data and any(
+            cpd.detections for cpd in plate_data.values()
+        )
+        if has_plates:
+            from trailvideocut.editor.resolve_script import (
+                generate_fusion_scripts,
+                generate_resolve_script,
+                try_execute_resolve_script,
+            )
+
+            # Always generate Fusion Lua scripts (works with Resolve Free)
+            plate_clips = []
+            for i, d in enumerate(plan.decisions):
+                cpd = plate_data.get(i) if plate_data else None
+                if not cpd or not cpd.detections:
+                    continue
+                # Use the same integer frame numbers OTIO writes for the
+                # clip's source_range start (round, not int truncation), so
+                # the Fusion clip-relative frame mapping aligns with how
+                # Resolve positions the clip from the .otio file.
+                # RationalTime.value is a float; cast to int for use as a
+                # dict key / range bound.
+                src_start_frame = int(_seconds_to_rational_time(d.source_start, fps).value)
+                src_end_frame = int(_seconds_to_rational_time(d.source_end, fps).value)
+                clip_dets = _build_clip_detections(cpd, src_start_frame, src_end_frame)
+                if clip_dets:
+                    frame_count = src_end_frame - src_start_frame
+                    # Detect PTS gap from concatenated source videos.
+                    # This is cached after the first call since the gap
+                    # position is a property of the source file, not the clip.
+                    pts_gap_kf = _detect_pts_gap_keyframe(
+                        video_path, src_start_frame, src_end_frame,
+                    )
+                    plate_clips.append((
+                        f"segment_{i + 1:03d}",
+                        clip_dets,
+                        fps,
+                        frame_count,
+                        src_start_frame,
+                        pts_gap_kf,
+                    ))
+
+            if plate_clips:
+                fusion_dir = otio_path.parent / (otio_path.stem + "_fusion")
+                fusion_dir.mkdir(exist_ok=True)
+                lua_paths = generate_fusion_scripts(plate_clips, fusion_dir)
+                console.print(f"  Fusion scripts: {fusion_dir}/ ({len(lua_paths)} file(s))")
+                console.print("  Usage: select clip > Fusion > Console > dofile('path/to/script.lua')")
+
+            # Also generate automation script for Studio users
+            script_content = generate_resolve_script(otio_path, fps)
+            script_path = otio_path.with_name(
+                otio_path.stem + "_resolve_plates.py",
+            )
+            script_path.write_text(script_content, encoding="utf-8")
+            console.print(f"  Resolve script: {script_path}")
+
+            if self.config.resolve_apply_blur:
+                success, msg = try_execute_resolve_script(script_path)
+                if success:
+                    console.print("  [green]Blur applied in Resolve[/green]")
+                else:
+                    console.print(f"  [yellow]{msg}[/yellow]")
+
         return otio_path
 
 
@@ -67,6 +146,133 @@ def _seconds_to_rational_time(seconds: float, fps: float) -> otio.opentime.Ratio
     return otio.opentime.RationalTime(round(seconds * fps), fps)
 
 
+def _build_clip_detections(
+    cpd: ClipPlateData,
+    src_start_frame: int,
+    src_end_frame: int,
+) -> dict[str, list[dict]]:
+    """Filter and re-key a clip's plate detections into the Fusion/OTIO dict form.
+
+    Keeps only detections whose absolute source-video frame number falls in
+    the half-open interval ``[src_start_frame, src_end_frame)``, shifts the
+    frame numbers to clip-relative (``frame_num - src_start_frame``), drops
+    boxes whose ``blur_strength <= 0``, and casts all numeric fields to
+    ``float`` so the result is JSON-serialisable.
+
+    Used by both the Fusion Lua generator and the OTIO metadata embedding
+    so the two payloads cannot drift.
+    """
+    result: dict[str, list[dict]] = {}
+    for frame_num, boxes in cpd.detections.items():
+        if not (src_start_frame <= frame_num < src_end_frame):
+            continue
+        rel = frame_num - src_start_frame
+        result[str(rel)] = [
+            {
+                "x": float(b.x),
+                "y": float(b.y),
+                "w": float(b.w),
+                "h": float(b.h),
+                "blur_strength": float(b.blur_strength),
+            }
+            for b in boxes
+            if b.blur_strength > 0.0
+        ]
+    return result
+
+
+def _detect_pts_gap_keyframe(
+    video_path: Path,
+    src_start_frame: int,
+    src_end_frame: int,
+) -> int | None:
+    """Detect if a PTS gap in the source video requires piecewise offset correction.
+
+    Concatenated ("merged") source videos can have a PTS discontinuity at
+    the join point.  When Resolve's decoder encounters such a gap, it is
+    off by one frame until it resyncs at the next keyframe.  This function
+    detects the gap and returns the first keyframe *within the clip's
+    content range* so the Lua generator can apply a piecewise correction.
+
+    Returns the absolute source frame number of the first keyframe in
+    ``[src_start_frame, src_end_frame)`` if a PTS gap exists before the
+    clip, or ``None`` if no correction is needed.
+    """
+    from trailvideocut.gpu import _find_ffmpeg
+
+    ffmpeg_bin = _find_ffmpeg()
+    if ffmpeg_bin is None:
+        return None
+    ffprobe_bin = str(Path(ffmpeg_bin).parent / "ffprobe")
+
+    try:
+        result = subprocess.run(
+            [
+                ffprobe_bin, "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "packet=pts,flags",
+                "-of", "csv=p=0",
+                str(video_path),
+            ],
+            capture_output=True, text=True, timeout=120,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        logger.warning("ffprobe failed for PTS gap detection; skipping correction")
+        return None
+
+    if result.returncode != 0:
+        return None
+
+    # Single pass: detect PTS gap before the clip AND find the first
+    # keyframe within the clip's content range.
+    has_gap_before_clip = False
+    first_keyframe_in_clip: int | None = None
+    expected_delta: int | None = None
+    prev_pts: int | None = None
+    frame_idx = 0
+
+    for line in result.stdout.splitlines():
+        parts = line.strip().split(",")
+        if len(parts) < 2:
+            frame_idx += 1
+            continue
+        try:
+            pts = int(parts[0])
+        except ValueError:
+            frame_idx += 1
+            continue
+        flags = parts[1] if len(parts) > 1 else ""
+
+        if prev_pts is not None:
+            delta = pts - prev_pts
+            if expected_delta is None:
+                expected_delta = delta
+            elif delta != expected_delta and frame_idx <= src_start_frame:
+                has_gap_before_clip = True
+
+        # Track keyframes within the clip range
+        if (has_gap_before_clip
+                and first_keyframe_in_clip is None
+                and src_start_frame <= frame_idx < src_end_frame
+                and "K" in flags):
+            first_keyframe_in_clip = frame_idx
+
+        # Once we've found what we need, stop scanning
+        if first_keyframe_in_clip is not None:
+            break
+
+        prev_pts = pts
+        frame_idx += 1
+
+    if first_keyframe_in_clip is not None:
+        logger.info(
+            "PTS gap detected before clip [%d, %d); "
+            "first keyframe in clip at frame %d",
+            src_start_frame, src_end_frame, first_keyframe_in_clip,
+        )
+    return first_keyframe_in_clip
+
+
 def _parse_timecode(tc: str | None, fps: float) -> otio.opentime.RationalTime:
     """Parse a SMPTE timecode like '10:23:45:08' into a RationalTime.
 
@@ -91,9 +297,12 @@ def _generate_otio_timeline(
     audio_path: Path,
     r_frame_rate: str,
     timecode: str | None = None,
+    plate_data: dict[int, ClipPlateData] | None = None,
+    fps: float | None = None,
 ) -> otio.schema.Timeline:
     """Generate an OTIO Timeline referencing source video with in/out points."""
-    fps = _parse_frame_rate(r_frame_rate)
+    if fps is None:
+        fps = _parse_frame_rate(r_frame_rate)
     tc_start = _parse_timecode(timecode, fps)
 
     # Media references — available_range starts at the embedded timecode
@@ -133,6 +342,27 @@ def _generate_otio_timeline(
                 duration=_seconds_to_rational_time(d.source_end - d.source_start, fps),
             ),
         )
+
+        # Embed plate data as clip metadata
+        if plate_data:
+            clip_index = i - 1  # decisions are 1-indexed, plate_data is 0-indexed
+            cpd = plate_data.get(clip_index)
+            if cpd and cpd.detections:
+                # Match the round() semantics of _seconds_to_rational_time
+                # used for the clip's source_range start so the OTIO clip
+                # position and the embedded clip-relative frame numbers
+                # agree.
+                src_start_frame = int(_seconds_to_rational_time(d.source_start, fps).value)
+                src_end_frame = int(_seconds_to_rational_time(d.source_end, fps).value)
+                clip_detections = _build_clip_detections(cpd, src_start_frame, src_end_frame)
+                if clip_detections:
+                    clip.metadata["trailvideocut"] = {
+                        "plates": {
+                            "fps": fps,
+                            "detections": clip_detections,
+                        },
+                    }
+
         clips.append(clip)
 
     if use_crossfade:

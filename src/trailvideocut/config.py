@@ -47,6 +47,7 @@ class TrailVideoCutConfig:
 
     # Export OTIO for DaVinci Resolve instead of rendering
     davinci: bool = False
+    resolve_apply_blur: bool = True  # Auto-apply blur in Resolve via scripting API
 
     # Plate blur
     plate_blur_enabled: bool = True
