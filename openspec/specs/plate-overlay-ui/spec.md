@@ -109,11 +109,11 @@ The system SHALL provide a "Clear Saved Plates" button in the plate controls are
 - **THEN** the "Clear Saved Plates" button SHALL be disabled
 
 ### Requirement: New action buttons in plate controls panel
-The system SHALL add a second button row in the Plate Detection group box containing "Detect Frame", "Clear Clip Plates", and "Clear Frame Plates" buttons. The buttons SHALL follow the same visual style as existing plate controls.
+The system SHALL display the Plate Detection group box occupying the full width of the bottom section (no longer sharing horizontal space with a clip details panel). The bottom section SHALL have a fixed height of 190px. All action buttons SHALL be in a single row. The settings, plate chips, and controls rows SHALL remain functionally identical but benefit from the additional horizontal space.
 
 #### Scenario: Button layout
 - **WHEN** the review page is displayed with plate detection controls visible
-- **THEN** a second row of buttons appears below the existing "Detect Plates / Add Plate / Show Plates" row, containing "Detect Frame", "Clear Clip Plates", and "Clear Frame Plates" buttons
+- **THEN** the Plate Detection group box SHALL span the full width of the bottom section, with a single row containing "Detect Plates", "Detect Frame", "Add Plate", "Clear Clip Plates", "Clear Frame Plates", and "Show Plates" checkbox
 
 #### Scenario: Buttons enabled after detection
 - **WHEN** plate detection has completed for at least one clip
@@ -122,6 +122,10 @@ The system SHALL add a second button row in the Plate Detection group box contai
 #### Scenario: Buttons disabled initially
 - **WHEN** the review page is first loaded with no plate data
 - **THEN** all three new buttons SHALL be disabled
+
+#### Scenario: Bottom section height
+- **WHEN** the ReviewPage is displayed
+- **THEN** the bottom section containing the Plate Detection panel SHALL have a fixed height of 190px
 
 ### Requirement: Button state updates on navigation
 The system SHALL update the enabled/disabled state of the new buttons when the user navigates between clips or seeks to a different frame position.

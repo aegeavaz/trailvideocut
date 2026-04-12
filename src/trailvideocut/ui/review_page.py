@@ -11,13 +11,12 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QHBoxLayout,
     QLabel,
-    QListWidget,
     QMessageBox,
+    QScrollArea,
     QProgressBar,
     QProgressDialog,
     QPushButton,
     QSlider,
-    QSplitter,
     QSpacerItem,
     QSizePolicy,
     QVBoxLayout,
@@ -53,6 +52,7 @@ class ReviewPage(QWidget):
         # Preview state
         self._audio_path: str = ""
         self._video_path: str = ""
+        self._base_summary: str = ""
         self._previewing: bool = False
         self._preview_clip_index: int = -1
         self._preview_decisions: list[EditDecision] = []
@@ -94,11 +94,19 @@ class ReviewPage(QWidget):
         nav.addWidget(self._btn_export)
         root.addLayout(nav)
 
-        # --- Summary ---
+        # --- Summary + selected clip info ---
+        summary_row = QHBoxLayout()
         self._summary = QLabel()
         self._summary.setProperty("name", "heading")
         self._summary.setStyleSheet("font-size: 13px; color: #ccc; padding: 4px;")
-        root.addWidget(self._summary)
+        summary_row.addWidget(self._summary)
+        summary_row.addStretch()
+        self._clip_info_label = QLabel()
+        self._clip_info_label.setStyleSheet(
+            "font-family: monospace; font-size: 13px; color: #ccc; padding: 4px;"
+        )
+        summary_row.addWidget(self._clip_info_label)
+        root.addLayout(summary_row)
 
         # --- Timeline ---
         timeline_group = QGroupBox("Source Video Timeline")
@@ -139,35 +147,16 @@ class ReviewPage(QWidget):
         # Spacing between player controls and bottom section
         root.addSpacerItem(QSpacerItem(0, 12, QSizePolicy.Minimum, QSizePolicy.Fixed))
 
-        # Bottom horizontal splitter: clip details + render settings
-        bottom_splitter = QSplitter(Qt.Horizontal)
-
-        # Clip details with prev/next navigation
-        clip_group = QGroupBox("Selected Clip")
-        clip_layout = QVBoxLayout(clip_group)
-
-        self._clip_info = QLabel("No clip selected")
-        self._clip_info.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-        self._clip_info.setStyleSheet("font-family: monospace; font-size: 11px;")
-        self._clip_info.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
-        clip_layout.addWidget(self._clip_info, stretch=1)
-
-        clip_nav = QHBoxLayout()
-        self._btn_prev_clip = QPushButton("<< Prev Clip")
-        self._btn_prev_clip.clicked.connect(self._prev_clip)
-        self._btn_next_clip = QPushButton("Next Clip >>")
-        self._btn_next_clip.clicked.connect(self._next_clip)
-        clip_nav.addWidget(self._btn_prev_clip)
-        clip_nav.addWidget(self._btn_next_clip)
-        clip_layout.addLayout(clip_nav)
-
-        bottom_splitter.addWidget(clip_group)
-
         # Plate detection settings & info
         plate_group = QGroupBox("Plate Detection")
+        plate_group.setStyleSheet(
+            "QGroupBox { margin-top: 4px; padding-top: 14px; }"
+            "QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; }"
+        )
         plate_layout = QVBoxLayout(plate_group)
+        plate_layout.setSpacing(4)
 
-        # Action buttons row
+        # Row 1: All action buttons in one row
         btn_row = QHBoxLayout()
         self._btn_detect_plates = QPushButton("Detect Plates")
         self._btn_detect_plates.setEnabled(False)
@@ -177,11 +166,35 @@ class ReviewPage(QWidget):
         self._btn_detect_plates.clicked.connect(self._on_detect_plates)
         btn_row.addWidget(self._btn_detect_plates)
 
+        self._btn_detect_frame = QPushButton("Detect Frame")
+        self._btn_detect_frame.setEnabled(False)
+        self._btn_detect_frame.setToolTip(
+            "Re-run plate detection on the current frame only"
+        )
+        self._btn_detect_frame.clicked.connect(self._on_detect_frame)
+        btn_row.addWidget(self._btn_detect_frame)
+
         self._btn_add_plate = QPushButton("Add Plate")
         self._btn_add_plate.setEnabled(False)
         self._btn_add_plate.setToolTip("Add a manual plate box at the current frame")
         self._btn_add_plate.clicked.connect(self._on_add_plate)
         btn_row.addWidget(self._btn_add_plate)
+
+        self._btn_clear_clip_plates = QPushButton("Clear Clip Plates")
+        self._btn_clear_clip_plates.setEnabled(False)
+        self._btn_clear_clip_plates.setToolTip(
+            "Delete all plates (detected and manual) in the selected clip"
+        )
+        self._btn_clear_clip_plates.clicked.connect(self._on_clear_clip_plates)
+        btn_row.addWidget(self._btn_clear_clip_plates)
+
+        self._btn_clear_frame_plates = QPushButton("Clear Frame Plates")
+        self._btn_clear_frame_plates.setEnabled(False)
+        self._btn_clear_frame_plates.setToolTip(
+            "Delete all plates (detected and manual) in the current frame"
+        )
+        self._btn_clear_frame_plates.clicked.connect(self._on_clear_frame_plates)
+        btn_row.addWidget(self._btn_clear_frame_plates)
 
         self._chk_show_plates = QCheckBox("Show Plates")
         self._chk_show_plates.setChecked(True)
@@ -191,135 +204,109 @@ class ReviewPage(QWidget):
 
         plate_layout.addLayout(btn_row)
 
-        # Second action buttons row
-        btn_row2 = QHBoxLayout()
-        self._btn_detect_frame = QPushButton("Detect Frame")
-        self._btn_detect_frame.setEnabled(False)
-        self._btn_detect_frame.setToolTip(
-            "Re-run plate detection on the current frame only"
-        )
-        self._btn_detect_frame.clicked.connect(self._on_detect_frame)
-        btn_row2.addWidget(self._btn_detect_frame)
-
-        self._btn_clear_clip_plates = QPushButton("Clear Clip Plates")
-        self._btn_clear_clip_plates.setEnabled(False)
-        self._btn_clear_clip_plates.setToolTip(
-            "Delete all plates (detected and manual) in the selected clip"
-        )
-        self._btn_clear_clip_plates.clicked.connect(self._on_clear_clip_plates)
-        btn_row2.addWidget(self._btn_clear_clip_plates)
-
-        self._btn_clear_frame_plates = QPushButton("Clear Frame Plates")
-        self._btn_clear_frame_plates.setEnabled(False)
-        self._btn_clear_frame_plates.setToolTip(
-            "Delete all plates (detected and manual) in the current frame"
-        )
-        self._btn_clear_frame_plates.clicked.connect(self._on_clear_frame_plates)
-        btn_row2.addWidget(self._btn_clear_frame_plates)
-
-        plate_layout.addLayout(btn_row2)
-
-        # Settings row
-        detect_row = QHBoxLayout()
-        detect_row.addWidget(QLabel("Confidence:"))
+        # Row 2: All detection settings in one row
+        settings_row = QHBoxLayout()
+        settings_row.addWidget(QLabel("Confidence:"))
         self._spin_confidence = QDoubleSpinBox()
         self._spin_confidence.setRange(0.01, 1.0)
         self._spin_confidence.setValue(0.05)
         self._spin_confidence.setSingleStep(0.05)
         self._spin_confidence.setToolTip("Minimum confidence threshold for plate detection")
-        detect_row.addWidget(self._spin_confidence)
+        settings_row.addWidget(self._spin_confidence)
 
         self._chk_exclude_phones = QCheckBox("Exclude Phone")
         self._chk_exclude_phones.setChecked(True)
         self._chk_exclude_phones.setToolTip("Exclude detected phone/device regions from plate results")
-        detect_row.addWidget(self._chk_exclude_phones)
+        settings_row.addWidget(self._chk_exclude_phones)
 
-        detect_row.addWidget(QLabel("Gap:"))
+        settings_row.addWidget(QLabel("Gap:"))
         self._spin_phone_gap = QSpinBox()
         self._spin_phone_gap.setRange(5, 120)
         self._spin_phone_gap.setValue(30)
         self._spin_phone_gap.setSingleStep(5)
         self._spin_phone_gap.setToolTip("Re-detect phone every N frames (lower = more accurate, slower)")
-        detect_row.addWidget(self._spin_phone_gap)
+        settings_row.addWidget(self._spin_phone_gap)
         self._chk_exclude_phones.toggled.connect(self._spin_phone_gap.setEnabled)
 
         self._chk_debug_plates = QCheckBox("Debug")
         self._chk_debug_plates.setToolTip("Print plate detection debug info to the console")
-        detect_row.addWidget(self._chk_debug_plates)
+        settings_row.addWidget(self._chk_debug_plates)
 
-        plate_layout.addLayout(detect_row)
-
-        # Aspect ratio filter row
-        ratio_row = QHBoxLayout()
-        ratio_row.addWidget(QLabel("Min Ratio:"))
+        settings_row.addWidget(QLabel("Min Ratio:"))
         self._spin_min_ratio = QDoubleSpinBox()
         self._spin_min_ratio.setRange(0.5, 5.0)
         self._spin_min_ratio.setValue(0.5)
         self._spin_min_ratio.setSingleStep(0.1)
         self._spin_min_ratio.setToolTip("Minimum width/height aspect ratio for plate geometry filter")
-        ratio_row.addWidget(self._spin_min_ratio)
+        settings_row.addWidget(self._spin_min_ratio)
 
-        ratio_row.addWidget(QLabel("Max Ratio:"))
+        settings_row.addWidget(QLabel("Max Ratio:"))
         self._spin_max_ratio = QDoubleSpinBox()
         self._spin_max_ratio.setRange(0.5, 10.0)
         self._spin_max_ratio.setValue(2.0)
         self._spin_max_ratio.setSingleStep(0.1)
         self._spin_max_ratio.setToolTip("Maximum width/height aspect ratio for plate geometry filter")
-        ratio_row.addWidget(self._spin_max_ratio)
+        settings_row.addWidget(self._spin_max_ratio)
 
-        ratio_row.addWidget(QLabel("Min W px:"))
+        settings_row.addWidget(QLabel("Min W px:"))
         self._spin_min_w = QSpinBox()
         self._spin_min_w.setRange(1, 200)
         self._spin_min_w.setValue(10)
         self._spin_min_w.setToolTip("Minimum plate width in pixels")
-        ratio_row.addWidget(self._spin_min_w)
+        settings_row.addWidget(self._spin_min_w)
 
-        ratio_row.addWidget(QLabel("Min H px:"))
+        settings_row.addWidget(QLabel("Min H px:"))
         self._spin_min_h = QSpinBox()
         self._spin_min_h.setRange(1, 200)
         self._spin_min_h.setValue(5)
         self._spin_min_h.setToolTip("Minimum plate height in pixels")
-        ratio_row.addWidget(self._spin_min_h)
+        settings_row.addWidget(self._spin_min_h)
 
-        ratio_row.addWidget(QLabel("Min Track:"))
+        settings_row.addWidget(QLabel("Min Track:"))
         self._spin_min_track = QSpinBox()
         self._spin_min_track.setRange(1, 30)
         self._spin_min_track.setValue(1)
         self._spin_min_track.setToolTip("Minimum consecutive frames a plate must appear in to be kept")
-        ratio_row.addWidget(self._spin_min_track)
-        ratio_row.addStretch()
-        plate_layout.addLayout(ratio_row)
+        settings_row.addWidget(self._spin_min_track)
 
-        # Persistence controls row
-        persist_row = QHBoxLayout()
+        plate_layout.addLayout(settings_row)
+
+        # Row 3: Plate chips (horizontal scrollable, like marks list)
+        self._plate_chips_scroll = QScrollArea()
+        self._plate_chips_scroll.setWidgetResizable(True)
+        self._plate_chips_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._plate_chips_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._plate_chips_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self._plate_chips_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        self._plate_chips_container = QWidget()
+        self._plate_chips_layout = QHBoxLayout(self._plate_chips_container)
+        self._plate_chips_layout.setContentsMargins(0, 0, 0, 0)
+        self._plate_chips_layout.setSpacing(6)
+        self._plate_chips_layout.addStretch()
+        self._plate_chips_scroll.setWidget(self._plate_chips_container)
+        plate_layout.addWidget(self._plate_chips_scroll)
+
+        # Row 4: Persistence, blur preview, and progress controls
+        controls_row = QHBoxLayout()
         self._btn_clear_plates = QPushButton("Clear Saved Plates")
         self._btn_clear_plates.setEnabled(False)
         self._btn_clear_plates.setToolTip("Delete saved plate data from disk and clear all detections")
         self._btn_clear_plates.clicked.connect(self._on_clear_plates)
-        persist_row.addWidget(self._btn_clear_plates)
+        controls_row.addWidget(self._btn_clear_plates)
 
         self._lbl_plate_status = QLabel()
         self._lbl_plate_status.setStyleSheet("font-size: 11px; color: #4CAF50;")
-        persist_row.addWidget(self._lbl_plate_status)
-        persist_row.addStretch()
-        plate_layout.addLayout(persist_row)
+        controls_row.addWidget(self._lbl_plate_status)
 
-        self._plate_list = QListWidget()
-        self._plate_list.setStyleSheet("font-family: monospace; font-size: 11px; color: #ccc;")
-        self._plate_list.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
-        self._plate_list.setSelectionMode(QListWidget.SingleSelection)
-        self._plate_list.currentRowChanged.connect(self._on_plate_list_selection_changed)
-        plate_layout.addWidget(self._plate_list, stretch=1)
-
-        # Blur preview button
         self._btn_preview_blur = QPushButton("Preview Blur")
         self._btn_preview_blur.setCheckable(True)
         self._btn_preview_blur.setEnabled(False)
         self._btn_preview_blur.setToolTip("Toggle blur preview on the video overlay")
         self._btn_preview_blur.toggled.connect(self._on_toggle_blur_preview)
-        plate_layout.addWidget(self._btn_preview_blur)
+        controls_row.addWidget(self._btn_preview_blur)
 
-        # Plate detection progress (always in layout to avoid resize)
+        controls_row.addStretch()
+
         self._plate_progress_bar = QProgressBar()
         self._plate_progress_bar.setTextVisible(True)
         self._plate_progress_bar.setMaximumHeight(20)
@@ -328,16 +315,12 @@ class ReviewPage(QWidget):
         self._btn_cancel_detect = QPushButton("Cancel")
         self._btn_cancel_detect.setEnabled(False)
         self._btn_cancel_detect.clicked.connect(self._on_cancel_detect)
-        plate_progress_row = QHBoxLayout()
-        plate_progress_row.addWidget(self._plate_progress_bar, stretch=1)
-        plate_progress_row.addWidget(self._btn_cancel_detect)
-        plate_layout.addLayout(plate_progress_row)
-        bottom_splitter.addWidget(plate_group)
-        bottom_splitter.setSizes([350, 250])
+        controls_row.addWidget(self._plate_progress_bar, stretch=1)
+        controls_row.addWidget(self._btn_cancel_detect)
+        plate_layout.addLayout(controls_row)
 
-        # Fixed-height bottom section (not resizable vertically)
-        bottom_splitter.setFixedHeight(200)
-        root.addWidget(bottom_splitter, stretch=0)
+        plate_group.setFixedHeight(190)
+        root.addWidget(plate_group, stretch=0)
 
         # Connect playback cursor, user seek deselection, and clip boundary check
         self._player.position_changed.connect(self._timeline.set_cursor_position)
@@ -384,13 +367,14 @@ class ReviewPage(QWidget):
         self._btn_detect_plates.setEnabled(bool(cut_plan.decisions))
 
         # Summary
-        self._summary.setText(
+        self._base_summary = (
             f"Tempo: {audio.tempo:.0f} BPM  |  "
             f"Beats: {len(audio.beats)}  |  "
             f"Clips: {len(cut_plan.decisions)}  |  "
             f"CV: {cut_plan.score_cv:.3f}  |  "
             f"Duration: {audio.duration:.1f}s"
         )
+        self._summary.setText(self._base_summary)
 
         # Timeline
         self._timeline.set_data(cut_plan.decisions, video_duration)
@@ -419,9 +403,6 @@ class ReviewPage(QWidget):
                 self._lbl_plate_status.setStyleSheet("")
                 self._plate_overlay.setVisible(self._chk_show_plates.isChecked())
                 self._sync_overlay_to_current_clip()
-
-        # Clip info
-        self._clip_info.setText("Click a clip on the timeline to see details")
 
     # --- Preview Mode ---
 
@@ -714,7 +695,7 @@ class ReviewPage(QWidget):
     def _show_clip_info(self, index: int):
         """Update the Selected Clip panel for clip at index."""
         if index < 0 or index >= len(self._timeline.clips):
-            self._clip_info.setText("No clip selected")
+            self._clip_info_label.setText("")
             return
 
         clip = self._timeline.clips[index]
@@ -744,29 +725,37 @@ class ReviewPage(QWidget):
             if manual_boxes:
                 plate_info += f" ({manual_boxes}m)"
 
-        self._clip_info.setText(
+        self._clip_info_label.setText(
             f"Clip {index + 1}/{len(self._timeline.clips)}"
             f"  Score: {clip.interest_score:.3f}"
             f"  Section: {section_label} ({section_energy:.2f})"
-            f"{plate_info}\n"
-            f"Source: {clip.source_start:.2f}s - {clip.source_end:.2f}s"
-            f" ({duration:.2f}s)   "
-            f"Target: {clip.target_start:.2f}s - {clip.target_end:.2f}s"
-            f" ({target_dur:.2f}s)"
+            f"{plate_info}"
+            f"  Src: {clip.source_start:.2f}-{clip.source_end:.2f}s ({duration:.2f}s)"
+            f"  Tgt: {clip.target_start:.2f}-{clip.target_end:.2f}s ({target_dur:.2f}s)"
         )
 
     def _on_clip_selected(self, index: int):
         if self._previewing:
-            # Seek preview to this clip's target position
             if 0 <= index < len(self._timeline.clips):
                 clip = self._timeline.clips[index]
+                # Pre-set preview clip index so later positionChanged won't re-seek
+                if clip in self._preview_decisions:
+                    self._preview_clip_index = self._preview_decisions.index(clip)
+                # Seek video directly to clip source start
+                self._player.seek_to(clip.source_start)
+                self._timeline.set_cursor_position(clip.source_start)
+                self._show_clip_info(index)
+                # Block signals during setPosition to prevent positionChanged
+                # from firing with stale/intermediate positions that would
+                # cause _on_music_position to seek to the wrong clip.
                 if self._music_player:
+                    self._music_player.blockSignals(True)
                     self._music_player.setPosition(int(clip.target_start * 1000))
-                    self._on_music_position(int(clip.target_start * 1000))
+                    self._music_player.blockSignals(False)
             return
 
         if index < 0 or index >= len(self._timeline.clips):
-            self._clip_info.setText("No clip selected")
+            self._clip_info_label.setText("")
             self._active_clip_end = None
             return
 
@@ -801,7 +790,7 @@ class ReviewPage(QWidget):
         if self._timeline.selected_index >= 0:
             self._timeline._selected = -1
             self._timeline.update()
-            self._clip_info.setText("No clip selected")
+            self._clip_info_label.setText("")
             self._active_clip_end = None
 
     def _check_clip_boundary(self, position: float):
@@ -817,38 +806,6 @@ class ReviewPage(QWidget):
 
     def _on_export(self):
         self.export_requested.emit()
-
-    def _prev_clip(self):
-        clips = self._timeline.clips
-        if not clips:
-            return
-        current = self._timeline.selected_index
-        new_index = max(0, current - 1) if current >= 0 else 0
-        if self._previewing:
-            clip = clips[new_index]
-            self._timeline._selected = new_index
-            self._timeline.update()
-            if self._music_player:
-                self._music_player.setPosition(int(clip.target_start * 1000))
-                self._on_music_position(int(clip.target_start * 1000))
-        else:
-            self._timeline.select_clip(new_index)
-
-    def _next_clip(self):
-        clips = self._timeline.clips
-        if not clips:
-            return
-        current = self._timeline.selected_index
-        new_index = min(len(clips) - 1, current + 1) if current >= 0 else 0
-        if self._previewing:
-            clip = clips[new_index]
-            self._timeline._selected = new_index
-            self._timeline.update()
-            if self._music_player:
-                self._music_player.setPosition(int(clip.target_start * 1000))
-                self._on_music_position(int(clip.target_start * 1000))
-        else:
-            self._timeline.select_clip(new_index)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1177,26 +1134,50 @@ class ReviewPage(QWidget):
             self._plate_overlay.raise_()
 
     def _refresh_plate_list(self):
-        """Populate the plate list widget with all boxes in the current frame."""
+        """Populate the plate chips with all boxes in the current frame."""
         self._plate_list_updating = True
         try:
-            self._plate_list.clear()
+            # Clear existing chips
+            while self._plate_chips_layout.count():
+                item = self._plate_chips_layout.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+
+            chip_style = (
+                "QPushButton { border-radius: 12px; padding: 4px 10px;"
+                " font-family: monospace; font-size: 11px;"
+                " background: #3a3a3a; color: #ccc; border: 1px solid #555; }"
+                " QPushButton:hover { background: #4a4a4a; }"
+            )
+            selected_style = (
+                "QPushButton { border-radius: 12px; padding: 4px 10px;"
+                " font-family: monospace; font-size: 11px;"
+                " background: #2196F3; color: #fff; border: 1px solid #2196F3; }"
+            )
             boxes = self._plate_overlay._current_boxes()
-            for box in boxes:
+            sel = self._plate_overlay._selected_idx
+            for i, box in enumerate(boxes):
                 kind = "M" if box.manual else "D"
                 text = (
-                    f"[{kind}] ({box.x:.3f},{box.y:.3f}) "
-                    f"{box.w:.3f}\u00d7{box.h:.3f} "
+                    f"[{kind}] ({box.x:.2f},{box.y:.2f}) "
+                    f"{box.w:.2f}\u00d7{box.h:.2f} "
                     f"C:{box.confidence:.0%}"
                 )
-                self._plate_list.addItem(text)
-            sel = self._plate_overlay._selected_idx
-            if 0 <= sel < self._plate_list.count():
-                self._plate_list.setCurrentRow(sel)
-            else:
-                self._plate_list.setCurrentRow(-1)
+                chip = QPushButton(text)
+                chip.setCursor(Qt.PointingHandCursor)
+                chip.setStyleSheet(selected_style if i == sel else chip_style)
+                chip.clicked.connect(lambda checked, idx=i: self._on_plate_chip_clicked(idx))
+                self._plate_chips_layout.addWidget(chip)
+            self._plate_chips_layout.addStretch()
         finally:
             self._plate_list_updating = False
+
+    def _on_plate_chip_clicked(self, idx: int):
+        """Handle user clicking a plate chip."""
+        if self._plate_list_updating:
+            return
+        self._plate_overlay.select_box(idx)
+        self._refresh_plate_list()
 
     def _update_plate_overlay_frame(self, position: float):
         """Update the overlay's current frame based on video playback position."""
@@ -1576,8 +1557,3 @@ class ReviewPage(QWidget):
         # Preview Blur: needs clip with plate data
         self._btn_preview_blur.setEnabled(clip_has_plates and not detecting)
 
-    def _on_plate_list_selection_changed(self, row: int):
-        """Handle user selecting a plate in the list widget."""
-        if self._plate_list_updating:
-            return
-        self._plate_overlay.select_box(row)
