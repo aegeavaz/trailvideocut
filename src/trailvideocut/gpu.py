@@ -51,6 +51,33 @@ def _find_ffmpeg() -> str | None:
     return None
 
 
+def _find_ffprobe() -> str | None:
+    """Find an ffprobe binary: system PATH first, then ffmpeg sibling fallback.
+
+    The imageio-ffmpeg bundle does NOT include ffprobe, so we must check
+    the system PATH independently.  On Windows, tries both ``ffprobe``
+    and ``ffprobe.exe``, and derives the extension from the ffmpeg binary
+    (e.g. ``ffmpeg.exe`` → ``ffprobe.exe``).
+    """
+    from pathlib import Path
+
+    path = shutil.which("ffprobe")
+    if path:
+        return path
+
+    # Fallback: try sibling of ffmpeg binary with matching extension
+    ffmpeg_bin = _find_ffmpeg()
+    if ffmpeg_bin:
+        ffmpeg_path = Path(ffmpeg_bin)
+        # Match extension (e.g. .exe on Windows)
+        for suffix in (ffmpeg_path.suffix, "", ".exe"):
+            candidate = ffmpeg_path.parent / f"ffprobe{suffix}"
+            if candidate.is_file():
+                return str(candidate)
+
+    return None
+
+
 def _check_ffmpeg_nvenc(ffmpeg_bin: str) -> bool:
     """Check whether a specific ffmpeg binary supports h264_nvenc."""
     try:

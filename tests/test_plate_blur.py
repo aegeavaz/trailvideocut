@@ -333,3 +333,55 @@ class TestCalibrateFrameOffset:
             offset = calibrate_frame_offset(frame, "/fake.mp4", expected_frame=10)
 
         assert offset == 0
+
+
+class TestNearestBoxes:
+    """Tests for PlateBlurProcessor._nearest_boxes()."""
+
+    def test_exact_match(self):
+        from trailvideocut.plate.blur import PlateBlurProcessor
+        boxes = [PlateBox(x=0.1, y=0.2, w=0.05, h=0.03)]
+        dets = {10: boxes}
+        result = PlateBlurProcessor._nearest_boxes(dets, 10)
+        assert result is boxes
+
+    def test_fallback_minus_1(self):
+        from trailvideocut.plate.blur import PlateBlurProcessor
+        boxes = [PlateBox(x=0.1, y=0.2, w=0.05, h=0.03)]
+        dets = {9: boxes}
+        result = PlateBlurProcessor._nearest_boxes(dets, 10)
+        assert result is boxes
+
+    def test_fallback_plus_1(self):
+        from trailvideocut.plate.blur import PlateBlurProcessor
+        boxes = [PlateBox(x=0.1, y=0.2, w=0.05, h=0.03)]
+        dets = {11: boxes}
+        result = PlateBlurProcessor._nearest_boxes(dets, 10)
+        assert result is boxes
+
+    def test_fallback_plus_2(self):
+        from trailvideocut.plate.blur import PlateBlurProcessor
+        boxes = [PlateBox(x=0.1, y=0.2, w=0.05, h=0.03)]
+        dets = {12: boxes}
+        result = PlateBlurProcessor._nearest_boxes(dets, 10, window=2)
+        assert result is boxes
+
+    def test_prefers_earlier_on_tie(self):
+        """When ±1 both exist, prefers earlier frame (offset -1 checked first)."""
+        from trailvideocut.plate.blur import PlateBlurProcessor
+        boxes_before = [PlateBox(x=0.1, y=0.2, w=0.05, h=0.03)]
+        boxes_after = [PlateBox(x=0.3, y=0.4, w=0.05, h=0.03)]
+        dets = {9: boxes_before, 11: boxes_after}
+        result = PlateBlurProcessor._nearest_boxes(dets, 10)
+        assert result is boxes_before
+
+    def test_outside_window_returns_empty(self):
+        from trailvideocut.plate.blur import PlateBlurProcessor
+        dets = {15: [PlateBox(x=0.1, y=0.2, w=0.05, h=0.03)]}
+        result = PlateBlurProcessor._nearest_boxes(dets, 10, window=2)
+        assert result == []
+
+    def test_empty_detections_returns_empty(self):
+        from trailvideocut.plate.blur import PlateBlurProcessor
+        result = PlateBlurProcessor._nearest_boxes({}, 10)
+        assert result == []

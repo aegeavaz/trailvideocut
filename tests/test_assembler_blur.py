@@ -96,10 +96,10 @@ class TestPreprocessBlurSegments:
 
 
 class TestAssembleBlurRouting:
-    """Tests that the blur export path uses calibrated MoviePy transform."""
+    """Tests that blur export routes through FFmpeg with PlateBlurProcessor."""
 
-    def test_moviepy_called_with_plate_data(self, assembler):
-        """When blur is active, assemble calls MoviePy with plate_data."""
+    def test_ffmpeg_hardcut_called_with_plate_data(self, assembler):
+        """When blur is active + hard_cut, assemble calls FFmpeg hardcut with plate_data."""
         plate_data = {
             0: ClipPlateData(clip_index=0, detections={5: [PlateBox(0.1, 0.2, 0.05, 0.03)]})
         }
@@ -110,7 +110,50 @@ class TestAssembleBlurRouting:
         )
 
         with patch.object(assembler, "_resolve_fps"), \
-             patch.object(assembler, "_assemble_moviepy") as mock_mp:
+             patch.object(assembler, "_assemble_ffmpeg_hardcut") as mock_hc, \
+             patch.object(assembler, "_cleanup_blur_temps"):
+            assembler.assemble(plan, plate_data=plate_data)
+
+        mock_hc.assert_called_once_with(plan, plate_data)
+
+    def test_ffmpeg_xfade_called_with_plate_data(self, assembler):
+        """When blur is active + crossfade (>1 clip), assemble calls FFmpeg xfade with plate_data."""
+        plate_data = {
+            0: ClipPlateData(clip_index=0, detections={5: [PlateBox(0.1, 0.2, 0.05, 0.03)]})
+        }
+        plan = CutPlan(
+            decisions=[
+                EditDecision(beat_index=0, source_start=0.0, source_end=2.0,
+                             target_start=0.0, target_end=2.0, interest_score=1.0),
+                EditDecision(beat_index=1, source_start=3.0, source_end=5.0,
+                             target_start=2.0, target_end=4.0, interest_score=1.0),
+            ],
+            total_duration=4.0, song_tempo=120.0, transition_style="crossfade",
+            crossfade_duration=0.5,
+        )
+
+        with patch.object(assembler, "_resolve_fps"), \
+             patch.object(assembler, "_assemble_ffmpeg_xfade") as mock_xf, \
+             patch.object(assembler, "_cleanup_blur_temps"):
+            assembler.assemble(plan, plate_data=plate_data)
+
+        mock_xf.assert_called_once_with(plan, plate_data)
+
+    def test_moviepy_fallback_receives_plate_data(self, assembler):
+        """When FFmpeg fails with blur active, MoviePy fallback receives plate_data."""
+        plate_data = {
+            0: ClipPlateData(clip_index=0, detections={5: [PlateBox(0.1, 0.2, 0.05, 0.03)]})
+        }
+        plan = CutPlan(
+            decisions=[EditDecision(beat_index=0, source_start=0.0, source_end=2.0,
+                                    target_start=0.0, target_end=2.0, interest_score=1.0)],
+            total_duration=2.0, song_tempo=120.0, transition_style="hard_cut",
+        )
+
+        with patch.object(assembler, "_resolve_fps"), \
+             patch.object(assembler, "_assemble_ffmpeg_hardcut", side_effect=RuntimeError("fail")), \
+             patch.object(assembler, "_assemble_moviepy") as mock_mp, \
+             patch.object(assembler, "_cleanup_blur_temps"):
             assembler.assemble(plan, plate_data=plate_data)
 
         mock_mp.assert_called_once_with(plan, plate_data)

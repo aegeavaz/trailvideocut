@@ -4,6 +4,7 @@ import subprocess
 import threading
 from collections.abc import Callable
 from fractions import Fraction
+from pathlib import Path
 
 from rich.console import Console
 from rich.progress import Progress, BarColumn, TimeRemainingColumn, TextColumn
@@ -113,13 +114,11 @@ class VideoAssembler:
             and any(cpd.detections for cpd in plate_data.values())
         )
 
-        if has_blur:
-            # MoviePy with calibrated offset + velocity-expanded blur boxes.
-            # The expansion covers ±1 frame of plate movement, making blur
-            # robust to the unavoidable timing drift in all pipelines.
-            console.print("  Using MoviePy with drift-tolerant blur...")
-            self._assemble_moviepy(plan, plate_data)
-            return
+        # Plate blur is handled by PlateBlurProcessor (deterministic OpenCV
+        # frame reading, consistent with the detector and preview).  The
+        # FFmpeg paths feed pre-blurred raw YUV segments into the filter
+        # graph; MoviePy is kept as a fallback only.
+        blur_plate_data = plate_data if has_blur else None
 
         try:
             if (
@@ -127,7 +126,7 @@ class VideoAssembler:
                 and len(plan.decisions) > 1
             ):
                 try:
-                    self._assemble_ffmpeg_xfade(plan, None)
+                    self._assemble_ffmpeg_xfade(plan, blur_plate_data)
                     return
                 except Exception as e:
                     console.print(
@@ -138,7 +137,7 @@ class VideoAssembler:
                         self._status_callback("FFmpeg failed, falling back to MoviePy...")
             else:
                 try:
-                    self._assemble_ffmpeg_hardcut(plan, None)
+                    self._assemble_ffmpeg_hardcut(plan, blur_plate_data)
                     return
                 except Exception as e:
                     console.print(
@@ -147,7 +146,7 @@ class VideoAssembler:
                     )
                     if self._status_callback:
                         self._status_callback("FFmpeg failed, falling back to MoviePy...")
-            self._assemble_moviepy(plan, None)
+            self._assemble_moviepy(plan, blur_plate_data)
         finally:
             self._cleanup_blur_temps()
 
@@ -224,6 +223,7 @@ class VideoAssembler:
         if not plate_data or not self.config.plate_blur_enabled:
             return [None] * len(segments), 0.0, ""
 
+        from trailvideocut.editor.exporter import _detect_pts_gap_keyframe
         from trailvideocut.plate.blur import PlateBlurProcessor
 
         fw, fh, source_fps, rational_fps = self._probe_source_video()
@@ -234,6 +234,16 @@ class VideoAssembler:
             if cpd is None or not cpd.detections:
                 result.append(None)
                 continue
+
+            # Detect PTS gap for piecewise offset correction (same
+            # approach as the DaVinci Lua script's comp_for_rel).
+            seg_start_frame = int(start * source_fps)
+            seg_end_frame = int((start + dur) * source_fps)
+            pts_gap_kf = _detect_pts_gap_keyframe(
+                Path(self.config.video_path),
+                seg_start_frame,
+                seg_end_frame,
+            )
 
             console.print(f"  Pre-processing blur for segment {seg_idx + 1} (clip {clip_idx})...")
             proc = PlateBlurProcessor(
@@ -246,6 +256,7 @@ class VideoAssembler:
                 frame_height=fh,
                 clip_index=clip_idx,
                 rational_fps=rational_fps,
+                pts_gap_keyframe=pts_gap_kf,
             )
             tmp_path, frames_written = proc.process_segment(
                 progress_callback=self._progress_callback,
@@ -331,23 +342,16 @@ class VideoAssembler:
 
         # When blur segments are mixed with original segments, normalize
         # all inputs so xfade works.
-        # Blur segments (MKV/FFV1): already have correct frame rate from
-        # the container — just reset timestamps with setpts, no fps= needed.
-        # Source segments: use fps= to normalize their timebase.
+        # Blur segments: use fps with round=zero to avoid the default
+        # nearest-rounding which can shift the first frame by 1.
+        # Source segments: fps with default rounding + pixel format.
         if has_blur_segments:
             fps_str = rational_fps or str(source_fps if source_fps > 0 else self.config.output_fps)
-            # Compute timebase string (1/fps) for settb on blur segments
-            if "/" in fps_str:
-                num, den = fps_str.split("/")
-                tb_str = f"{den}/{num}"
-            else:
-                tb_str = f"1/{fps_str}"
             for i in range(n):
                 is_blur = blur_overrides and blur_overrides[i] is not None
                 if is_blur:
-                    # Match source timebase + reset start — no fps= resampling
                     filters.append(
-                        f"[{i}:v]settb={tb_str},setpts=PTS-STARTPTS[v{i}]"
+                        f"[{i}:v]fps={fps_str}[v{i}]"
                     )
                 else:
                     filters.append(
@@ -458,15 +462,28 @@ class VideoAssembler:
         cmd = [ffmpeg_bin, "-y"]
 
         # Per-segment inputs: source video with fast seeking, or
-        # pre-blurred MKV files (lossless FFV1 with proper timestamps).
+        # pre-blurred raw YUV files from PlateBlurProcessor.
         video_path = str(self.config.video_path)
+        fps_str_rational = rational_fps or str(source_fps)
+
+        if has_blur:
+            import cv2 as _cv2
+            _cap = _cv2.VideoCapture(video_path)
+            fw = int(_cap.get(_cv2.CAP_PROP_FRAME_WIDTH))
+            fh = int(_cap.get(_cv2.CAP_PROP_FRAME_HEIGHT))
+            _cap.release()
 
         for i, (start, dur, _clip_idx) in enumerate(segments):
             override = blur_overrides[i]
             if override is not None:
                 tmp_path, _exact_dur = override
-                # MKV/FFV1 file — read normally (has timestamps + frame rate)
-                cmd.extend(["-i", tmp_path])
+                cmd.extend([
+                    "-f", "rawvideo",
+                    "-pix_fmt", "yuv420p",
+                    "-s", f"{fw}x{fh}",
+                    "-r", fps_str_rational,
+                    "-i", tmp_path,
+                ])
             else:
                 cmd.extend(["-ss", f"{start:.6f}", "-t", f"{dur:.6f}", "-i", video_path])
 
@@ -559,7 +576,9 @@ class VideoAssembler:
             for i in range(n):
                 is_blur = blur_overrides and blur_overrides[i] is not None
                 if is_blur:
-                    filters.append(f"[{i}:v]fps={fps_str}[v{i}]")
+                    filters.append(
+                        f"[{i}:v]fps={fps_str}[v{i}]"
+                    )
                 else:
                     filters.append(f"[{i}:v]fps={fps_str},format=yuv420p[v{i}]")
             concat_inputs = "".join(f"[v{i}]" for i in range(n))
@@ -791,9 +810,9 @@ class VideoAssembler:
             if not subclips_with_idx:
                 raise RuntimeError("No valid subclips produced from cut plan")
 
-            # Apply blur via transform() with calibrated offset + expanded boxes.
-            # Box expansion covers ±1 frame of plate movement, making blur
-            # robust to unavoidable timing drift in all pipelines.
+            # Fallback blur via MoviePy transform() with calibrated offset +
+            # expanded boxes.  The primary FFmpeg path uses PlateBlurProcessor
+            # which is deterministic; this path is a best-effort fallback.
             if plate_data and self.config.plate_blur_enabled:
                 import cv2 as _cv2
                 from trailvideocut.plate.blur import (
@@ -807,9 +826,10 @@ class VideoAssembler:
                 _cap.release()
 
                 console.print(
-                    f"  [cyan]BLUR EXPORT (calibrated + drift-tolerant)[/cyan] "
-                    f"fps={source_fps}"
+                    "  [yellow]FFmpeg blur failed, using MoviePy fallback "
+                    "(drift-tolerant but less precise)[/yellow]"
                 )
+                console.print(f"  [cyan]MoviePy blur[/cyan] fps={source_fps}")
 
                 def _make_blur_fn(cpd_ref, calibrated_start, fps_val):
                     """Apply drift-expanded blur to each frame."""

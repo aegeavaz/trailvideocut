@@ -198,12 +198,11 @@ def _detect_pts_gap_keyframe(
     ``[src_start_frame, src_end_frame)`` if a PTS gap exists before the
     clip, or ``None`` if no correction is needed.
     """
-    from trailvideocut.gpu import _find_ffmpeg
+    from trailvideocut.gpu import _find_ffprobe
 
-    ffmpeg_bin = _find_ffmpeg()
-    if ffmpeg_bin is None:
+    ffprobe_bin = _find_ffprobe()
+    if ffprobe_bin is None:
         return None
-    ffprobe_bin = str(Path(ffmpeg_bin).parent / "ffprobe")
 
     try:
         result = subprocess.run(

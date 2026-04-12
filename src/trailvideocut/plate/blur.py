@@ -301,6 +301,91 @@ def _detect_near_stored(
     return result
 
 
+def _find_first_keyframe(
+    video_path: str | Path,
+    start_frame: int,
+    end_frame: int,
+    fps: float = 0,
+) -> int | None:
+    """Find the first keyframe in ``[start_frame, end_frame)``.
+
+    Tries ffprobe first (fast packet scan), falls back to ffmpeg
+    ``-vf showinfo`` (works with imageio-ffmpeg on Windows).
+
+    Returns the **absolute** frame number of the first keyframe, or
+    ``None`` on failure.
+    """
+    import subprocess
+
+    # --- Attempt 1: ffprobe (fast, no decoding) ---
+    from trailvideocut.gpu import _find_ffprobe
+    ffprobe_bin = _find_ffprobe()
+    if ffprobe_bin is not None:
+        try:
+            result = subprocess.run(
+                [
+                    ffprobe_bin, "-v", "error",
+                    "-select_streams", "v:0",
+                    "-show_entries", "packet=pts,flags",
+                    "-of", "csv=p=0",
+                    str(video_path),
+                ],
+                capture_output=True, text=True, timeout=120,
+            )
+            if result.returncode == 0:
+                frame_idx = 0
+                for line in result.stdout.splitlines():
+                    if frame_idx >= end_frame:
+                        break
+                    parts = line.strip().split(",")
+                    if len(parts) >= 2 and "K" in parts[-1]:
+                        if frame_idx >= start_frame:
+                            return frame_idx
+                    frame_idx += 1
+        except (subprocess.TimeoutExpired, OSError):
+            pass  # fall through to ffmpeg
+
+    # --- Attempt 2: ffmpeg -vf showinfo (works without ffprobe) ---
+    from trailvideocut.gpu import _find_ffmpeg
+    ffmpeg_bin = _find_ffmpeg()
+    if ffmpeg_bin is None or fps <= 0:
+        return None
+
+    # Seek a bit before the segment and scan ~5 seconds
+    seek_time = max(0, start_frame / fps - 0.5)
+    scan_dur = (end_frame - start_frame) / fps + 1.0
+    try:
+        result = subprocess.run(
+            [
+                ffmpeg_bin, "-hide_banner",
+                "-ss", f"{seek_time:.6f}",
+                "-i", str(video_path),
+                "-t", f"{scan_dur:.6f}",
+                "-vf", "showinfo",
+                "-f", "null", "-",
+            ],
+            capture_output=True, text=True, timeout=120,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+
+    # Parse showinfo output from stderr: lines contain n:N and iskey:1
+    import re
+    for line in result.stderr.splitlines():
+        if "iskey:1" not in line:
+            continue
+        m = re.search(r"\bn:\s*(\d+)\b", line)
+        pts_m = re.search(r"\bpts_time:\s*([\d.]+)", line)
+        if m and pts_m:
+            # Convert pts_time to absolute frame number
+            pts_time = float(pts_m.group(1))
+            abs_frame = int((seek_time + pts_time) * fps)
+            if start_frame <= abs_frame < end_frame:
+                return abs_frame
+
+    return None
+
+
 class PlateBlurProcessor:
     """Pre-processes a video segment by applying Gaussian blur to plate regions.
 
@@ -323,6 +408,7 @@ class PlateBlurProcessor:
         clip_index: int = -1,
         detector: "PlateDetector | None" = None,
         rational_fps: str = "",
+        pts_gap_keyframe: int | None = None,
     ):
         self._video_path = str(video_path)
         self._segment_start = segment_start
@@ -334,6 +420,7 @@ class PlateBlurProcessor:
         self._clip_index = clip_index
         self._detector = detector
         self._rational_fps = rational_fps or str(fps)
+        self._pts_gap_keyframe = pts_gap_keyframe
 
     def _get_boxes_for_frame(
         self,
@@ -373,16 +460,46 @@ class PlateBlurProcessor:
         # Inside range, no detection at this frame — plate not visible
         return []
 
+    @staticmethod
+    def _nearest_boxes(
+        detections: dict[int, list[PlateBox]],
+        frame_num: int,
+        window: int = 2,
+    ) -> list[PlateBox]:
+        """Return boxes from the nearest frame within ±*window*.
+
+        Same logic as the DaVinci Lua script's ``_nearest_box_for_frame``:
+        exact match first, then ±1, ±2, etc.  Returns the **original**
+        boxes (no expansion), so the blur region is precise.
+        """
+        boxes = detections.get(frame_num)
+        if boxes is not None:
+            return boxes
+        for offset in range(1, window + 1):
+            prev = detections.get(frame_num - offset)
+            if prev is not None:
+                return prev
+            nxt = detections.get(frame_num + offset)
+            if nxt is not None:
+                return nxt
+        return []
+
     def process_segment(
         self,
         progress_callback: Callable[[int, int], None] | None = None,
     ) -> tuple[Path, int]:
         """Read segment frames, blur plate regions, write to a temp file.
 
-        Reads frames using **OpenCV** ``CAP_PROP_POS_FRAMES`` seeking —
-        the same method that ``grab_frame()`` and the blur preview use.
-        This guarantees that the blur processor sees the exact same frame
-        content as the preview, so manual plate positions match exactly.
+        Applies the same piecewise frame-sync correction as the DaVinci
+        Lua script's ``comp_for_rel()``: OpenCV's seek to a mid-GOP
+        inter-frame causes a +1 frame offset until the decoder resyncs
+        at the next keyframe.  The first keyframe in the segment is
+        detected via ffprobe (or ffmpeg fallback), and frames before it
+        use ``lookup_frame = abs_frame + 1``; after, ``abs_frame``.
+
+        Uses **nearest-neighbor lookup** within ±2 frames for precise
+        box matching (same as ``_nearest_box_for_frame`` in the Lua
+        script).
 
         Returns ``(path, frames_written)``.
         """
@@ -401,21 +518,20 @@ class PlateBlurProcessor:
         det_min = det_keys[0] if det_keys else seg_start_frame
         det_max = det_keys[-1] if det_keys else seg_start_frame
 
-        print(
-            f"  [blur] clip={self._clip_index} "
-            f"seg_start={self._segment_start:.6f}s "
-            f"fps={self._fps:.4f} "
-            f"seg_frames={seg_start_frame}-{seg_end_frame} "
-            f"det_range={det_min}-{det_max} "
-            f"decoder=opencv"
+        # Find the first keyframe in the segment.  OpenCV's seek to a
+        # mid-GOP inter-frame causes a +1 frame offset until the decoder
+        # resyncs at the next keyframe.  Same pattern as the DaVinci Lua
+        # script's comp_for_rel().
+        first_kf = _find_first_keyframe(
+            self._video_path, seg_start_frame, seg_end_frame,
+            fps=self._fps,
         )
 
-        # Write blurred frames as raw YUV420P (no container, no timestamps).
-        tmp = tempfile.NamedTemporaryFile(
-            suffix=".yuv", prefix="plate_blur_", delete=False,
+        logger.info(
+            "blur clip=%d seg=%d-%d det=%d-%d first_kf=%s",
+            self._clip_index, seg_start_frame, seg_end_frame,
+            det_min, det_max, first_kf,
         )
-        tmp_path = Path(tmp.name)
-        tmp.close()
 
         # Read frames with OpenCV (same as grab_frame / blur preview)
         cap = cv2.VideoCapture(self._video_path)
@@ -423,10 +539,18 @@ class PlateBlurProcessor:
             raise RuntimeError(f"Cannot open video: {self._video_path}")
 
         try:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, seg_start_frame)
+
+            # Write blurred frames as raw YUV420P
+            tmp = tempfile.NamedTemporaryFile(
+                suffix=".yuv", prefix="plate_blur_", delete=False,
+            )
+            tmp_path = Path(tmp.name)
+            tmp.close()
+
             frames_written = 0
             total_seg_frames = max(1, seg_end_frame - seg_start_frame)
-
-            cap.set(cv2.CAP_PROP_POS_FRAMES, seg_start_frame)
+            dets = self._plate_data.detections
 
             with open(tmp_path, "wb") as raw_out:
                 for abs_frame in range(seg_start_frame, seg_end_frame):
@@ -434,7 +558,18 @@ class PlateBlurProcessor:
                     if not ret:
                         break
 
-                    boxes = self._get_boxes_for_frame(abs_frame, det_keys)
+                    # Piecewise correction: before first keyframe,
+                    # decoder is off by +1; after resync, correct.
+                    if first_kf is not None and abs_frame < first_kf:
+                        lookup_frame = abs_frame + 1
+                    else:
+                        lookup_frame = abs_frame
+
+                    boxes = self._nearest_boxes(dets, lookup_frame)
+                    if not boxes:
+                        boxes = self._get_boxes_for_frame(
+                            lookup_frame, det_keys,
+                        )
 
                     if boxes:
                         apply_blur_to_frame(
