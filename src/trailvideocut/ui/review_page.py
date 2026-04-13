@@ -111,6 +111,7 @@ class ReviewPage(QWidget):
         # --- Timeline ---
         timeline_group = QGroupBox("Source Video Timeline")
         timeline_layout = QVBoxLayout(timeline_group)
+        timeline_layout.setContentsMargins(2, 2, 2, 2)
         self._timeline = TimelineWidget()
         self._timeline.clip_selected.connect(self._on_clip_selected)
         self._timeline.clip_moved.connect(self._on_clip_moved)
@@ -648,7 +649,7 @@ class ReviewPage(QWidget):
             # Same clip — check drift and correct if needed
             current_video_pos = self._player.current_time
             drift = abs(current_video_pos - expected_source_pos)
-            if drift > 0.15:
+            if drift > 0.15 or not music_playing:
                 self._player.seek_to(expected_source_pos)
                 if music_playing:
                     self._player.play()

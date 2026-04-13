@@ -4,8 +4,8 @@ from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from trailvideocut.editor.models import EditDecision
 
-_MARGIN_LEFT = 50
-_MARGIN_RIGHT = 10
+_MARGIN_LEFT = 30
+_MARGIN_RIGHT = 5
 
 
 def _score_to_color(score: float) -> QColor:
