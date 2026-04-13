@@ -130,52 +130,46 @@ class TestGetBoxesForFrame:
         result = proc._get_boxes_for_frame(105, [100, 110])
         assert result == []
 
-    def test_after_last_detection_returns_nearest(self):
-        boxes_last = [PlateBox(x=0.3, y=0.4, w=0.05, h=0.03)]
+    def test_after_last_detection_returns_empty(self):
+        """Frames after the last detection return empty (no extrapolation)."""
         proc = self._make_processor({
             100: [PlateBox(x=0.1, y=0.2, w=0.05, h=0.03)],
-            200: boxes_last,
+            200: [PlateBox(x=0.3, y=0.4, w=0.05, h=0.03)],
         })
         result = proc._get_boxes_for_frame(205, [100, 200])
-        assert result is boxes_last
+        assert result == []
 
-    def test_before_first_detection_returns_nearest(self):
-        boxes_first = [PlateBox(x=0.1, y=0.2, w=0.05, h=0.03)]
+    def test_before_first_detection_returns_empty(self):
+        """Frames before the first detection return empty (no extrapolation)."""
         proc = self._make_processor({
-            100: boxes_first,
+            100: [PlateBox(x=0.1, y=0.2, w=0.05, h=0.03)],
             200: [PlateBox(x=0.3, y=0.4, w=0.05, h=0.03)],
         })
         result = proc._get_boxes_for_frame(95, [100, 200])
-        assert result is boxes_first
+        assert result == []
 
     def test_empty_detections_returns_empty(self):
         proc = self._make_processor({})
         result = proc._get_boxes_for_frame(100, [])
         assert result == []
 
-    def test_manual_plate_beyond_clip_used_for_extrapolation(self):
-        """User-added manual plates beyond auto-detection range are respected."""
-        auto_boxes = [PlateBox(x=0.1, y=0.2, w=0.05, h=0.03)]
-        manual_boxes = [PlateBox(x=0.5, y=0.6, w=0.08, h=0.04, manual=True)]
+    def test_far_before_first_detection_returns_empty(self):
+        """Frames far before the detection range return empty."""
         proc = self._make_processor({
-            100: auto_boxes,
-            200: auto_boxes,
-            # Manual plate added at frame 210 (beyond auto range)
-            210: manual_boxes,
+            100: [PlateBox(x=0.1, y=0.2, w=0.05, h=0.03)],
+            200: [PlateBox(x=0.3, y=0.4, w=0.05, h=0.03)],
         })
-        det_keys = [100, 200, 210]
-        # Frame 212 is beyond range, nearest is 210 (manual)
-        result = proc._get_boxes_for_frame(212, det_keys)
-        assert result is manual_boxes
+        result = proc._get_boxes_for_frame(0, [100, 200])
+        assert result == []
 
-    def test_nearest_key_picks_closer_when_between_boundaries(self):
-        """When frame is outside range, pick the closer boundary."""
-        boxes_a = [PlateBox(x=0.1, y=0.2, w=0.05, h=0.03)]
-        boxes_b = [PlateBox(x=0.5, y=0.6, w=0.08, h=0.04)]
-        proc = self._make_processor({50: boxes_a, 100: boxes_b})
-        # Frame 45 is before range, nearest is 50
-        result = proc._get_boxes_for_frame(45, [50, 100])
-        assert result is boxes_a
+    def test_far_after_last_detection_returns_empty(self):
+        """Frames far after the detection range return empty."""
+        proc = self._make_processor({
+            100: [PlateBox(x=0.1, y=0.2, w=0.05, h=0.03)],
+            200: [PlateBox(x=0.3, y=0.4, w=0.05, h=0.03)],
+        })
+        result = proc._get_boxes_for_frame(500, [100, 200])
+        assert result == []
 
 
 class TestExpandBoxesForDrift:

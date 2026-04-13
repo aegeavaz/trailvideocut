@@ -45,7 +45,7 @@ When exporting to DaVinci Resolve with plate data, the system SHALL generate a P
 - **THEN** the generated script SHALL create 3 blur nodes in the Fusion composition, each with keyframed center/width/height matching the per-frame bounding box positions
 
 ### Requirement: Fusion blur composition structure
-The generated Fusion composition for each clip SHALL follow this node structure: MediaIn -> Merge(Background=MediaIn, Foreground=Blur) -> MediaOut. For each plate region, there SHALL be a separate Blur node with a Rectangle mask. The mask's center, width, and height SHALL be keyframed per-frame using the plate bounding box data.
+The generated Fusion composition for each clip SHALL follow this node structure: MediaIn -> Merge(Background=MediaIn, Foreground=Blur) -> MediaOut. For each plate region, there SHALL be a separate Blur node with a Rectangle mask. The mask's center, width, and height SHALL be keyframed per-frame using the plate bounding box data. The Lua script SHALL insert zero-size boundary keyframes (Width=0, Height=0) at the frame immediately before the first detection and the frame immediately after the last detection for each plate track, preventing Fusion's spline hold behavior from extending blur to undetected frames.
 
 #### Scenario: Single plate with constant position
 - **WHEN** a clip has one plate at the same position across all frames
@@ -54,6 +54,18 @@ The generated Fusion composition for each clip SHALL follow this node structure:
 #### Scenario: Multiple plates with movement
 - **WHEN** a clip has two plates, one moving and one stationary
 - **THEN** the Fusion composition SHALL have two Blur nodes, each with its own Rectangle mask; the moving plate's mask SHALL have per-frame keyframes for center position
+
+#### Scenario: Plate detection starts mid-clip in Fusion
+- **WHEN** a clip has 300 frames and plate detections exist only for frames 100-250
+- **THEN** the Lua script SHALL set a zero-size mask keyframe (Width=0, Height=0) at frame 99 (or comp_for_rel(99)) and a zero-size mask keyframe at frame 251 (or comp_for_rel(251)), so that Fusion does NOT display blur for frames 0-98 or frames 252-299
+
+#### Scenario: Plate detection starts at frame 0
+- **WHEN** a clip has plate detections starting from frame 0
+- **THEN** the Lua script SHALL NOT insert a pre-boundary keyframe (since there are no preceding frames to suppress), and the first detection keyframe SHALL be set normally
+
+#### Scenario: Plate detection ends at last frame
+- **WHEN** a clip has plate detections ending at the last frame (frame_count - 1)
+- **THEN** the Lua script SHALL NOT insert a post-boundary keyframe (since there are no following frames to suppress), and the last detection keyframe SHALL be set normally
 
 ### Requirement: Blur size auto-scaling by relative plate area
 The Fusion Blur node's XBlurSize SHALL be auto-scaled based on the plate's bounding-box area (`w × h`) relative to all plates in the clip. The smallest plate area maps to XBlurSize=1.0, the largest to XBlurSize=2.0, with linear interpolation for intermediate sizes. All detected plates are included in the composition.

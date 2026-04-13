@@ -420,34 +420,14 @@ class PlateBlurProcessor:
         """Look up detection boxes for *frame_num*.
 
         1. Exact match — returns boxes at that frame (auto-detected or manual).
-        2. Outside detection range — returns boxes from the **nearest** frame
-           key.  This handles crossfade-extended segments and respects any
-           manual plates the user added beyond the original clip boundaries.
-        3. Inside range but no entry — plate was not visible; returns ``[]``.
+        2. Outside detection range or inside range with no entry — plate was
+           not visible; returns ``[]``.
         """
         dets = self._plate_data.detections
         boxes = dets.get(frame_num)
         if boxes is not None:
             return boxes
 
-        if not det_keys:
-            return []
-
-        # Frame is outside the detection range — extrapolate from nearest key
-        if frame_num < det_keys[0] or frame_num > det_keys[-1]:
-            import bisect
-            idx = bisect.bisect_left(det_keys, frame_num)
-            if idx == 0:
-                nearest = det_keys[0]
-            elif idx >= len(det_keys):
-                nearest = det_keys[-1]
-            else:
-                before = det_keys[idx - 1]
-                after = det_keys[idx]
-                nearest = before if (frame_num - before) <= (after - frame_num) else after
-            return dets.get(nearest, [])
-
-        # Inside range, no detection at this frame — plate not visible
         return []
 
     @staticmethod

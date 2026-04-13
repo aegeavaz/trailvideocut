@@ -105,9 +105,15 @@ class TestLuaCoordinateConversion:
         width_lines = _find_keyframe_lines(script, "Width")
         # Frames 10 and 11 both have detections; frames 8, 9 are within the
         # nearest-neighbor window so they also get the same value via lookup.
+        # Frame 7 has a zero-size boundary keyframe.
         assert width_lines, f"no Width keyframe lines:\n{script}"
         for line in width_lines:
-            assert _parse_scalar_rhs(line) == 0.2, line
+            val = _parse_scalar_rhs(line)
+            frame = _parse_keyframe_frame(line)
+            if frame == 7:
+                assert val == 0, line  # boundary keyframe
+            else:
+                assert val == 0.2, line
             assert "aspect" not in line, line
 
     def test_height_keyframe_is_passthrough(self):
@@ -117,7 +123,12 @@ class TestLuaCoordinateConversion:
         height_lines = _find_keyframe_lines(script, "Height")
         assert height_lines
         for line in height_lines:
-            assert abs(_parse_scalar_rhs(line) - 0.05) < 1e-9, line
+            val = _parse_scalar_rhs(line)
+            frame = _parse_keyframe_frame(line)
+            if frame == 7:
+                assert val == 0, line  # boundary keyframe
+            else:
+                assert abs(val - 0.05) < 1e-9, line
             assert "aspect" not in line
 
     def test_center_y_is_inverted_for_y_up(self):
@@ -129,8 +140,12 @@ class TestLuaCoordinateConversion:
         assert center_lines
         for line in center_lines:
             cx, cy = _parse_center_xy(line)
+            frame = _parse_keyframe_frame(line)
             assert cx == 0.5
-            assert abs(cy - 0.525) < 1e-9, line
+            if frame == 7:
+                assert abs(cy - 0.5) < 1e-9, line  # boundary keyframe
+            else:
+                assert abs(cy - 0.525) < 1e-9, line
 
     def test_center_x_is_passthrough(self):
         script = _generate_lua_script_for_clip(
@@ -185,27 +200,31 @@ class TestDenseKeyframes:
         #   frame 10 is 3 frames from the nearest detection (frame 7), beyond
         #   _NEAREST_WINDOW=2 -> no keyframe at frame 10.
         #   All other frames 0..9 are within +/-2 of at least one detection.
+        #   Frame 10 gets a zero-size post-boundary keyframe (last_kf=9, 9+1<11).
         script = _generate_lua_script_for_clip(
             "clipA", detections, frame_count=11,
         )
         center_lines = _find_keyframe_lines(script, "Center")
         frames = sorted(_parse_keyframe_frame(ln) for ln in center_lines)
-        assert frames == list(range(10)), frames
+        # 0-9 are detection keyframes, 10 is zero-size boundary
+        assert frames == list(range(11)), frames
 
     def test_no_keyframe_outside_window(self):
         """Comp frames more than _NEAREST_WINDOW away from any detection get
-        no keyframe at all."""
+        no keyframe at all (except for the zero-size post-boundary keyframe)."""
         detections = _make_detections({
             0: {"x": 0.1, "y": 0.1, "w": 0.05, "h": 0.05},
         })
         # frame_count=10 -> frames 0,1,2 within window (dist 0,1,2),
-        # frames 3..9 are >2 away -> no keyframes.
+        # frames 4..9 are >2 away -> no keyframes.
+        # Frame 3 gets a zero-size post-boundary (last_kf=2, 2+1<10).
+        # No pre-boundary since first_kf=0.
         script = _generate_lua_script_for_clip(
             "clipA", detections, frame_count=10,
         )
         center_lines = _find_keyframe_lines(script, "Center")
         frames = sorted(_parse_keyframe_frame(ln) for ln in center_lines)
-        assert frames == [0, 1, 2], frames
+        assert frames == [0, 1, 2, 3], frames
 
     def test_keyframe_does_not_union_neighbors(self):
         """The keyframe at frame N uses exactly the box from frame N (or the
@@ -383,6 +402,115 @@ class TestGroupIntoTracks:
         })
         tracks = _group_into_tracks(detections)
         assert len(tracks) == 2
+
+
+# ---------------------------------------------------------------------------
+# Boundary keyframes (zero-size mask outside detection range)
+# ---------------------------------------------------------------------------
+
+
+class TestBoundaryKeyframes:
+    """Fusion holds the first/last keyframe value for all frames outside the
+    keyframe range.  Zero-size boundary keyframes at first_kf-1 and last_kf+1
+    prevent blur from appearing on undetected frames.
+    """
+
+    def test_pre_boundary_keyframe_when_detections_start_mid_clip(self):
+        """When detections start at frame 50, a zero-size keyframe is inserted
+        at frame 49 for Width, Height, and XBlurSize."""
+        detections = _make_detections({
+            50: {"x": 0.4, "y": 0.45, "w": 0.2, "h": 0.05},
+            51: {"x": 0.4, "y": 0.45, "w": 0.2, "h": 0.05},
+        })
+        script = _generate_lua_script_for_clip(
+            "clipA", detections, frame_count=100,
+        )
+        # Pre-boundary at frame 47 (first_kf=48 due to ±2 window, so 48-1=47)
+        width_lines = _find_keyframe_lines(script, "Width")
+        width_by_frame = {
+            _parse_keyframe_frame(ln): _parse_scalar_rhs(ln) for ln in width_lines
+        }
+        assert 47 in width_by_frame
+        assert width_by_frame[47] == 0
+
+        height_lines = _find_keyframe_lines(script, "Height")
+        height_by_frame = {
+            _parse_keyframe_frame(ln): _parse_scalar_rhs(ln) for ln in height_lines
+        }
+        assert 47 in height_by_frame
+        assert height_by_frame[47] == 0
+
+    def test_post_boundary_keyframe_when_detections_end_before_clip_end(self):
+        """When detections end at frame 51, a zero-size keyframe is inserted
+        after the last keyframed frame."""
+        detections = _make_detections({
+            50: {"x": 0.4, "y": 0.45, "w": 0.2, "h": 0.05},
+            51: {"x": 0.4, "y": 0.45, "w": 0.2, "h": 0.05},
+        })
+        script = _generate_lua_script_for_clip(
+            "clipA", detections, frame_count=100,
+        )
+        # Last kf is at 53 (51+2 window), post-boundary at 54
+        width_lines = _find_keyframe_lines(script, "Width")
+        width_by_frame = {
+            _parse_keyframe_frame(ln): _parse_scalar_rhs(ln) for ln in width_lines
+        }
+        assert 54 in width_by_frame
+        assert width_by_frame[54] == 0
+
+    def test_no_pre_boundary_when_detections_start_at_frame_0(self):
+        """When detections start at frame 0, no pre-boundary keyframe is needed."""
+        detections = _make_detections({
+            0: {"x": 0.4, "y": 0.45, "w": 0.2, "h": 0.05},
+            1: {"x": 0.4, "y": 0.45, "w": 0.2, "h": 0.05},
+        })
+        script = _generate_lua_script_for_clip(
+            "clipA", detections, frame_count=10,
+        )
+        width_lines = _find_keyframe_lines(script, "Width")
+        frames = sorted(_parse_keyframe_frame(ln) for ln in width_lines)
+        # No frame before 0 should exist
+        assert all(f >= 0 for f in frames)
+        # Frame 0 should be the actual detection (not zero)
+        width_by_frame = {
+            _parse_keyframe_frame(ln): _parse_scalar_rhs(ln) for ln in width_lines
+        }
+        assert width_by_frame[0] == 0.2
+
+    def test_no_post_boundary_when_detections_end_at_last_frame(self):
+        """When detections end at the last frame, no post-boundary is needed."""
+        detections = _make_detections({
+            8: {"x": 0.4, "y": 0.45, "w": 0.2, "h": 0.05},
+            9: {"x": 0.4, "y": 0.45, "w": 0.2, "h": 0.05},
+        })
+        # frame_count=10, last detection at 9, nearest window gives kf at 9
+        # 9+1=10 >= frame_count=10, so no post-boundary
+        script = _generate_lua_script_for_clip(
+            "clipA", detections, frame_count=10,
+        )
+        width_lines = _find_keyframe_lines(script, "Width")
+        frames = sorted(_parse_keyframe_frame(ln) for ln in width_lines)
+        # No frame >= frame_count should exist
+        assert all(f < 10 for f in frames)
+
+    def test_blur_size_also_gets_boundary_keyframes(self):
+        """XBlurSize spline also gets zero-size boundary keyframes."""
+        detections = _make_detections({
+            50: {"x": 0.4, "y": 0.45, "w": 0.2, "h": 0.05},
+            51: {"x": 0.4, "y": 0.45, "w": 0.2, "h": 0.05},
+        })
+        script = _generate_lua_script_for_clip(
+            "clipA", detections, frame_count=100,
+        )
+        blur_lines = _find_keyframe_lines(script, "XBlurSize", mask_var="blur1")
+        blur_by_frame = {
+            _parse_keyframe_frame(ln): _parse_scalar_rhs(ln) for ln in blur_lines
+        }
+        # Pre-boundary at 47 and post-boundary at 54
+        assert 47 in blur_by_frame
+        assert blur_by_frame[47] == 0
+        assert 54 in blur_by_frame
+        assert blur_by_frame[54] == 0
 
 
 class TestEmptyDetections:

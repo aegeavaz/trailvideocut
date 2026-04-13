@@ -265,6 +265,14 @@ def _generate_lua_script_for_clip(
             cy = 1.0 - (box["y"] + box["h"] / 2)
             kf_data.append((f, cx, cy, box["w"], box["h"]))
 
+        # Compute boundary frames for zero-size keyframes.
+        # Fusion holds the first/last keyframe value for all frames outside
+        # the keyframe range.  Inserting zero-size keyframes one frame before
+        # the first detection and one frame after the last detection prevents
+        # blur from appearing on frames where no plate was detected.
+        first_kf_frame = kf_data[0][0] if kf_data else 0
+        last_kf_frame = kf_data[-1][0] if kf_data else 0
+
         # Per-track diagnostic: print the first keyframe so the user can
         # cross-check Center / sizes against the preview overlay at runtime.
         if kf_data:
@@ -281,18 +289,30 @@ def _generate_lua_script_for_clip(
         # PTS-gap correction when needed.
         lines.append(f"-- Animate mask center")
         lines.append(f"{mask_var}.Center = XYPath({{}})")
+        if first_kf_frame > 0:
+            lines.append(f"{mask_var}.Center[comp_for_rel({first_kf_frame - 1})] = {{0.5, 0.5}}")
         for frame, cx, cy, _w, _h in kf_data:
             lines.append(f"{mask_var}.Center[comp_for_rel({frame})] = {{{cx}, {cy}}}")
+        if last_kf_frame + 1 < frame_count:
+            lines.append(f"{mask_var}.Center[comp_for_rel({last_kf_frame + 1})] = {{0.5, 0.5}}")
 
         lines.append(f"-- Animate mask width")
         lines.append(f"{mask_var}.Width = BezierSpline({{}})")
+        if first_kf_frame > 0:
+            lines.append(f"{mask_var}.Width[comp_for_rel({first_kf_frame - 1})] = 0")
         for frame, _cx, _cy, w, _h in kf_data:
             lines.append(f"{mask_var}.Width[comp_for_rel({frame})] = {w}")
+        if last_kf_frame + 1 < frame_count:
+            lines.append(f"{mask_var}.Width[comp_for_rel({last_kf_frame + 1})] = 0")
 
         lines.append(f"-- Animate mask height")
         lines.append(f"{mask_var}.Height = BezierSpline({{}})")
+        if first_kf_frame > 0:
+            lines.append(f"{mask_var}.Height[comp_for_rel({first_kf_frame - 1})] = 0")
         for frame, _cx, _cy, _w, h in kf_data:
             lines.append(f"{mask_var}.Height[comp_for_rel({frame})] = {h}")
+        if last_kf_frame + 1 < frame_count:
+            lines.append(f"{mask_var}.Height[comp_for_rel({last_kf_frame + 1})] = 0")
 
         # At the transition comp frame (where offset switches), write an
         # extra keyframe to cover the duplicated source frame.  This
@@ -355,11 +375,15 @@ def _generate_lua_script_for_clip(
         # Blur size: auto-scaled by relative plate area within the clip
         lines.append(f"-- Animate blur size (auto-scaled by relative plate area)")
         lines.append(f"{blur_var}.XBlurSize = BezierSpline({{}})")
+        if first_kf_frame > 0:
+            lines.append(f"{blur_var}.XBlurSize[comp_for_rel({first_kf_frame - 1})] = 0")
         for frame, _cx, _cy, _w, _h in kf_data:
             bs = blur_sizes.get((ti, frame), _BLUR_SIZE_MIN)
             lines.append(
                 f"{blur_var}.XBlurSize[comp_for_rel({frame})] = {bs}"
             )
+        if last_kf_frame + 1 < frame_count:
+            lines.append(f"{blur_var}.XBlurSize[comp_for_rel({last_kf_frame + 1})] = 0")
 
         lines.append(f"prev_output = {blur_var}")
 
