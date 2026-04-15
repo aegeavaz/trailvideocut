@@ -69,6 +69,7 @@ class ReviewPage(QWidget):
         self._cached_detector_settings: tuple | None = None  # settings fingerprint
         self._pending_frame_detect: bool = False  # flag for post-download frame detect
         self._blur_preview_timer: QTimer | None = None  # throttle blur preview updates
+        self._plate_list_refresh_timer: QTimer | None = None  # coalesce chip rebuilds during scrub
 
         self._build_ui()
 
@@ -337,8 +338,10 @@ class ReviewPage(QWidget):
         # Keyboard shortcuts (same as setup page)
         ctx = Qt.WidgetWithChildrenShortcut
         QShortcut(Qt.Key_Space, self, self._on_space, context=ctx)
-        QShortcut(Qt.Key_Left, self, self._player._step_back, context=ctx)
-        QShortcut(Qt.Key_Right, self, self._player._step_forward, context=ctx)
+        sc_left = QShortcut(Qt.Key_Left, self, self._on_step_back_pressed, context=ctx)
+        sc_left.setAutoRepeat(False)
+        sc_right = QShortcut(Qt.Key_Right, self, self._on_step_forward_pressed, context=ctx)
+        sc_right.setAutoRepeat(False)
         QShortcut(Qt.Key_Up, self, self._player._jump_forward, context=ctx)
         QShortcut(Qt.Key_Down, self, self._player._jump_back, context=ctx)
         QShortcut(Qt.Key_Home, self, self._player._go_start, context=ctx)
@@ -543,11 +546,9 @@ class ReviewPage(QWidget):
         elif action == "jump_back":
             self._preview_jump(-5000)
         elif action == "step_forward":
-            frame_ms = int(1000.0 / self._player._fps)
-            self._preview_step(frame_ms)
+            self._preview_step_frame(+1)
         elif action == "step_back":
-            frame_ms = int(1000.0 / self._player._fps)
-            self._preview_step(-frame_ms)
+            self._preview_step_frame(-1)
         elif action in ("seek", "slider_moved"):
             self._preview_seek_ms(args[0])
         elif action == "wheel":
@@ -590,6 +591,18 @@ class ReviewPage(QWidget):
             new_pos = max(0, min(current + delta_ms, total))
             self._music_player.setPosition(new_pos)
             self._on_music_position(new_pos)
+
+    def _preview_step_frame(self, direction: int):
+        """Advance music position by exactly one video-frame duration."""
+        if not (self._music_player and self._audio):
+            return
+        current_ms = self._music_player.position()
+        current_frame = self._player.frame_at(current_ms / 1000.0)
+        target_ms = self._player.frame_to_ms(current_frame + direction)
+        total = int(self._audio.duration * 1000)
+        new_pos = max(0, min(target_ms, total))
+        self._music_player.setPosition(new_pos)
+        self._on_music_position(new_pos)
 
     def _preview_seek_ms(self, position_ms: int):
         if self._music_player:
@@ -686,6 +699,19 @@ class ReviewPage(QWidget):
             self._preview_toggle_play()
         else:
             self._player.toggle_play()
+
+    def _on_step_forward_pressed(self):
+        self._player._step_forward()
+        self._player.start_step_hold(+1)
+
+    def _on_step_back_pressed(self):
+        self._player._step_back()
+        self._player.start_step_hold(-1)
+
+    def keyReleaseEvent(self, event):
+        if not event.isAutoRepeat() and event.key() in (Qt.Key_Left, Qt.Key_Right):
+            self._player.stop_step_hold()
+        super().keyReleaseEvent(event)
 
     def _on_back(self):
         self._stop_preview_if_active()
@@ -1080,8 +1106,7 @@ class ReviewPage(QWidget):
 
         # Set geometry and current frame immediately so boxes are visible now
         self._position_overlay()
-        fps = self._player.fps
-        frame_num = int(self._player.current_time * fps)
+        frame_num = self._player.frame_at(self._player.current_time)
         self._plate_overlay.set_current_frame(frame_num, force=True)
         self._refresh_plate_list()
         self._update_frame_buttons()
@@ -1134,6 +1159,15 @@ class ReviewPage(QWidget):
             self._position_overlay()
             self._plate_overlay.raise_()
 
+    def _schedule_plate_list_refresh(self):
+        """Coalesce chip rebuilds so rapid scrubbing doesn't thrash the UI."""
+        if self._plate_list_refresh_timer is None:
+            self._plate_list_refresh_timer = QTimer(self)
+            self._plate_list_refresh_timer.setSingleShot(True)
+            self._plate_list_refresh_timer.setInterval(100)
+            self._plate_list_refresh_timer.timeout.connect(self._refresh_plate_list)
+        self._plate_list_refresh_timer.start()
+
     def _refresh_plate_list(self):
         """Populate the plate chips with all boxes in the current frame."""
         self._plate_list_updating = True
@@ -1185,11 +1219,10 @@ class ReviewPage(QWidget):
         if not self._plate_overlay.isVisible():
             self._update_frame_buttons()
             return
-        fps = self._player.fps
-        frame_num = int(position * fps)
+        frame_num = self._player.frame_at(position)
         self._plate_overlay.set_current_frame(frame_num)
         self._position_overlay()
-        self._refresh_plate_list()
+        self._schedule_plate_list_refresh()
         self._update_frame_buttons()
         if self._btn_preview_blur.isChecked():
             self._schedule_blur_preview()
@@ -1419,8 +1452,7 @@ class ReviewPage(QWidget):
             if selected < 0:
                 return
 
-        fps = self._player.fps
-        frame_num = int(self._player.current_time * fps)
+        frame_num = self._player.frame_at(self._player.current_time)
 
         # Extract frame from video
         cap = _cv2.VideoCapture(self._video_path)
@@ -1518,8 +1550,7 @@ class ReviewPage(QWidget):
         if selected < 0 or selected not in self._plate_data:
             return
 
-        fps = self._player.fps
-        frame_num = int(self._player.current_time * fps)
+        frame_num = self._player.frame_at(self._player.current_time)
         clip_data = self._plate_data[selected]
 
         if frame_num not in clip_data.detections:
@@ -1550,8 +1581,7 @@ class ReviewPage(QWidget):
         # Clear Frame Plates: needs current frame with plates
         frame_has_plates = False
         if clip_has_plates:
-            fps = self._player.fps
-            frame_num = int(self._player.current_time * fps)
+            frame_num = self._player.frame_at(self._player.current_time)
             frame_has_plates = frame_num in self._plate_data[selected].detections
         self._btn_clear_frame_plates.setEnabled(frame_has_plates and not detecting)
 

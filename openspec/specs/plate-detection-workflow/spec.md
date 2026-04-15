@@ -78,7 +78,7 @@ The system SHALL extract the current frame from the video using OpenCV, matching
 
 #### Scenario: Frame extraction matches player position
 - **WHEN** single-frame detection is triggered
-- **THEN** the system reads the frame at position `round(current_time * fps)` from the video file and passes it to `detect_frame_tiled()`
+- **THEN** the system reads the frame at the index returned by the shared `VideoPlayer.frame_at` helper (which computes `int(current_time * fps + 1e-9)` via `trailvideocut.utils.frame_math.position_to_frame`) and passes it to `detect_frame_tiled()`
 
 #### Scenario: Frame extraction failure
 - **WHEN** the video frame cannot be read (seek failure, corrupted file)

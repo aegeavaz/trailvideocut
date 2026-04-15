@@ -1,7 +1,9 @@
 from pathlib import Path
 
 import cv2
-from PySide6.QtCore import QPointF, QRectF, Qt, QUrl, Signal
+
+from trailvideocut.utils.frame_math import frame_to_position_ms, position_to_frame
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
@@ -121,6 +123,11 @@ class VideoPlayer(QWidget):
         self._max_zoom = 5.0
         self._invert_wheel = False  # when True, plain wheel zooms, Ctrl+wheel seeks
 
+        # Key-hold stepping (smooth scrub while arrow key is held)
+        self._hold_step_timer: QTimer | None = None
+        self._hold_step_delay_timer: QTimer | None = None
+        self._hold_step_direction: int = 0
+
         self._player.positionChanged.connect(self._on_position_changed)
         self._player.durationChanged.connect(self._on_duration_changed)
         self._player.playbackStateChanged.connect(self._on_state_changed)
@@ -147,6 +154,14 @@ class VideoPlayer(QWidget):
     @property
     def current_time(self) -> float:
         return self._player.position() / 1000.0
+
+    def frame_at(self, position_s: float) -> int:
+        """Return the frame number for the given position in seconds."""
+        return position_to_frame(position_s, self._fps)
+
+    def frame_to_ms(self, frame: int) -> int:
+        """Return the millisecond position of the given frame number."""
+        return frame_to_position_ms(frame, self._fps)
 
     @property
     def zoom_factor(self) -> float:
@@ -248,7 +263,7 @@ class VideoPlayer(QWidget):
     def update_time_label_external(self, current_s: float, total_s: float):
         """Update time label from external source."""
         self._time_label.setText(f"{self._fmt(current_s)} / {self._fmt(total_s)}")
-        frame = int(current_s * self._fps)
+        frame = self.frame_at(current_s)
         self._frame_label.setText(f"F: {frame}")
 
     def restore_slider_range(self):
@@ -515,15 +530,56 @@ class VideoPlayer(QWidget):
         if self._on_transport:
             self._on_transport("step_forward")
             return
-        frame_ms = round(1000.0 / self._fps)
-        self._user_seek(min(self._player.position() + frame_ms, self._duration_ms))
+        current_frame = self.frame_at(self.current_time)
+        target_ms = self.frame_to_ms(current_frame + 1)
+        self._user_seek(min(target_ms, self._duration_ms))
 
     def _step_back(self):
         if self._on_transport:
             self._on_transport("step_back")
             return
-        frame_ms = round(1000.0 / self._fps)
-        self._user_seek(max(self._player.position() - frame_ms, 0))
+        current_frame = self.frame_at(self.current_time)
+        target_ms = self.frame_to_ms(current_frame - 1)
+        self._user_seek(max(target_ms, 0))
+
+    def start_step_hold(self, direction: int):
+        """Drive continuous frame-stepping at ~30 fps once a key has been held.
+
+        An initial delay (~300 ms) mirrors OS autorepeat behavior so single
+        taps don't accidentally trigger the repeating timer.
+        """
+        if direction not in (-1, 1):
+            return
+        self._hold_step_direction = direction
+        if self._hold_step_delay_timer is None:
+            self._hold_step_delay_timer = QTimer(self)
+            self._hold_step_delay_timer.setSingleShot(True)
+            self._hold_step_delay_timer.setInterval(300)  # ms initial delay
+            self._hold_step_delay_timer.timeout.connect(self._begin_hold_step)
+        self._hold_step_delay_timer.start()
+
+    def _begin_hold_step(self):
+        if self._hold_step_direction == 0:
+            return
+        if self._hold_step_timer is None:
+            self._hold_step_timer = QTimer(self)
+            self._hold_step_timer.setInterval(33)  # ms, ~30 fps
+            self._hold_step_timer.timeout.connect(self._on_hold_step_tick)
+        self._hold_step_timer.start()
+
+    def stop_step_hold(self):
+        """Stop continuous frame-stepping (cancels both delay and repeat)."""
+        if self._hold_step_delay_timer is not None:
+            self._hold_step_delay_timer.stop()
+        if self._hold_step_timer is not None:
+            self._hold_step_timer.stop()
+        self._hold_step_direction = 0
+
+    def _on_hold_step_tick(self):
+        if self._hold_step_direction > 0:
+            self._step_forward()
+        elif self._hold_step_direction < 0:
+            self._step_back()
 
     # --- helpers ---
 
@@ -531,7 +587,7 @@ class VideoPlayer(QWidget):
         self._time_label.setText(
             f"{self._fmt(self.current_time)} / {self._fmt(self.duration)}"
         )
-        frame = int(self._player.position() / 1000.0 * self._fps)
+        frame = self.frame_at(self.current_time)
         self._frame_label.setText(f"F: {frame}")
 
     @staticmethod

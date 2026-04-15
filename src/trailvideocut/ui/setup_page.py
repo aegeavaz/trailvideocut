@@ -212,14 +212,31 @@ class SetupPage(QWidget):
         # Keyboard shortcuts
         ctx = Qt.WidgetWithChildrenShortcut
         QShortcut(Qt.Key_Space, self, self._player.toggle_play, context=ctx)
-        QShortcut(Qt.Key_Left, self, self._player._step_back, context=ctx)
-        QShortcut(Qt.Key_Right, self, self._player._step_forward, context=ctx)
+        sc_left = QShortcut(Qt.Key_Left, self, self._on_step_back_pressed, context=ctx)
+        sc_left.setAutoRepeat(False)
+        sc_right = QShortcut(Qt.Key_Right, self, self._on_step_forward_pressed, context=ctx)
+        sc_right.setAutoRepeat(False)
         QShortcut(Qt.Key_Up, self, self._player._jump_forward, context=ctx)
         QShortcut(Qt.Key_Down, self, self._player._jump_back, context=ctx)
         QShortcut(Qt.Key_Home, self, self._player._go_start, context=ctx)
         QShortcut(Qt.Key_End, self, self._player._go_end, context=ctx)
         QShortcut(Qt.Key_A, self, self._add_mark, context=ctx)
         QShortcut(Qt.Key_D, self, self._remove_mark, context=ctx)
+
+    # --- Key-hold stepping ---
+
+    def _on_step_forward_pressed(self):
+        self._player._step_forward()
+        self._player.start_step_hold(+1)
+
+    def _on_step_back_pressed(self):
+        self._player._step_back()
+        self._player.start_step_hold(-1)
+
+    def keyReleaseEvent(self, event):
+        if not event.isAutoRepeat() and event.key() in (Qt.Key_Left, Qt.Key_Right):
+            self._player.stop_step_hold()
+        super().keyReleaseEvent(event)
 
     # --- File browsing ---
 

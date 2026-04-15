@@ -488,19 +488,10 @@ class PlateBlurProcessor:
         det_min = det_keys[0] if det_keys else seg_start_frame
         det_max = det_keys[-1] if det_keys else seg_start_frame
 
-        # Find the first keyframe in the segment.  OpenCV's seek to a
-        # mid-GOP inter-frame causes a +1 frame offset until the decoder
-        # resyncs at the next keyframe.  Same pattern as the DaVinci Lua
-        # script's comp_for_rel().
-        first_kf = _find_first_keyframe(
-            self._video_path, seg_start_frame, seg_end_frame,
-            fps=self._fps,
-        )
-
         logger.info(
-            "blur clip=%d seg=%d-%d det=%d-%d first_kf=%s",
+            "blur clip=%d seg=%d-%d det=%d-%d",
             self._clip_index, seg_start_frame, seg_end_frame,
-            det_min, det_max, first_kf,
+            det_min, det_max,
         )
 
         # Read frames with OpenCV (same as grab_frame / blur preview)
@@ -528,12 +519,15 @@ class PlateBlurProcessor:
                     if not ret:
                         break
 
-                    # Piecewise correction: before first keyframe,
-                    # decoder is off by +1; after resync, correct.
-                    if first_kf is not None and abs_frame < first_kf:
-                        lookup_frame = abs_frame + 1
-                    else:
-                        lookup_frame = abs_frame
+                    # The blur pipeline's cap.set() lands mid-GOP for most
+                    # segments, so OpenCV returns source frame (abs_frame+1)
+                    # content for the entire segment — it never resyncs
+                    # because the segment typically ends before the decoder
+                    # catches up. The detector, which drives clip-scoped
+                    # scans from keyframe-aligned starts, doesn't have this
+                    # offset, so we compensate by always looking up
+                    # abs_frame+1.
+                    lookup_frame = abs_frame + 1
 
                     boxes = self._nearest_boxes(dets, lookup_frame)
                     if not boxes:
