@@ -35,6 +35,9 @@ jobs:
           Write-Host "NVENC support:"
           .\ffmpeg.exe -hide_banner -encoders 2>$null | Select-String "h264_nvenc"
 
+      - name: Import-check UI modules
+        run: python -c "import trailvideocut.ui.app; import trailvideocut.ui.video_player"
+
       - name: Build executable
         run: pyinstaller trailvideocut.spec
 

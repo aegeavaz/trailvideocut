@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from pathlib import Path
 
 import cv2
@@ -114,7 +115,7 @@ class VideoPlayer(QWidget):
         self._fps = 30.0  # overwritten with real source FPS in load_video()
         self._want_play = False  # desired play/pause state (user intent)
         self._seeking = False
-        self._on_transport: callable | None = None
+        self._on_transport: Callable | None = None
         self._external_control: bool = False
 
         # Zoom state
@@ -243,7 +244,7 @@ class VideoPlayer(QWidget):
         self._btn_play.setText("Play")
         self._player.stop()
 
-    def set_transport_callback(self, cb: callable | None):
+    def set_transport_callback(self, cb: Callable | None):
         """Set callback(action, *args) that intercepts transport actions."""
         self._on_transport = cb
 
