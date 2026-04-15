@@ -124,12 +124,15 @@ def _generate_lua_script_for_clip(
 
     *pts_gap_keyframe* — if the source video was concatenated from
     multiple clips, the merge can introduce a PTS discontinuity that
-    causes Resolve's decoder to be off by one frame until it encounters
-    a keyframe and resyncs.  When set, this is the absolute source frame
-    number of the first keyframe *within this clip's content range*.
-    The Lua script uses it at runtime to compute a piecewise offset:
-    ``clip_offset - 1`` before the keyframe resync, ``clip_offset``
-    after.  See ``_detect_pts_gap_keyframe()`` in ``exporter.py``.
+    leaves Resolve's decoder off by one frame for the entire clip's
+    playback (it does not resync within the clip's duration, mirroring
+    the OpenCV mid-GOP behaviour the MP4 path compensates for in
+    ``PlateBlurProcessor.process_segment``).  When non-nil, the Lua
+    script shifts every keyframe back by 1 comp frame
+    (``comp_for_rel(rel) = clip_offset + rel - 1``); when nil, no
+    correction is applied.  The actual frame number is currently used
+    only as a diagnostic — its non-nil-ness is what gates the
+    correction.  See ``_detect_pts_gap_keyframe()`` in ``exporter.py``.
     """
     tracks = _group_into_tracks(detections)
     if not tracks:
@@ -187,31 +190,24 @@ def _generate_lua_script_for_clip(
         "",
         "-- PTS gap correction for concatenated source videos.",
         "-- When the source was merged from multiple clips, a PTS discontinuity",
-        "-- can cause Resolve's decoder to be off by 1 frame until it resyncs at",
-        "-- the first keyframe.  PTS_GAP_KEYFRAME is the absolute source frame of",
-        "-- that keyframe (set by the exporter, nil if no gap detected).",
-        "-- DECODE_DELAY accounts for B-frame reordering after the keyframe.",
-        "-- H.265 with hierarchical B-frames typically needs 4-8 frames for the",
-        "-- decoder to fully resync after a keyframe.  6 is empirically correct",
-        "-- for DJI Mimo 23.976fps HEVC (24-frame GOP with hierarchical B-frames).",
+        "-- causes Resolve's decoder to stay off by 1 frame for the entire",
+        "-- clip's playback (it does not resync within the clip's duration).",
+        "-- PTS_GAP_KEYFRAME is non-nil when such a gap exists before this",
+        "-- clip; in that case we shift every keyframe back by 1 comp frame.",
+        "-- See _detect_pts_gap_keyframe() in exporter.py and the matching",
+        "-- MP4 fix in PlateBlurProcessor (blur.py: lookup_frame = abs_frame + 1",
+        "-- for the whole segment).",
         f"local PTS_GAP_KEYFRAME = {pts_gap_keyframe if pts_gap_keyframe is not None else 'nil'}",
-        "local DECODE_DELAY = 6",
-        "local transition_comp = nil  -- comp frame where offset switches from -1 to 0",
+        "local pts_gap_offset = 0",
         "if PTS_GAP_KEYFRAME then",
-        "  transition_comp = PTS_GAP_KEYFRAME + mi_clip_start + DECODE_DELAY",
-        "  print('PTS gap correction: keyframe=' .. PTS_GAP_KEYFRAME ..",
-        "        ' transition_comp=' .. transition_comp)",
+        "  pts_gap_offset = -1",
+        "  print('PTS gap correction active: keyframe=' .. PTS_GAP_KEYFRAME ..",
+        "        ' shifting all keyframes by -1 comp frame')",
         "end",
         "",
         "-- Helper: compute the comp frame for a clip-relative frame.",
-        "-- Before transition_comp: use clip_offset - 1 (decoder is off by 1).",
-        "-- From transition_comp onward: use clip_offset (decoder resynced).",
         "local function comp_for_rel(rel)",
-        "  local base = clip_offset + rel",
-        "  if transition_comp and (base - 1) < transition_comp then",
-        "    return base - 1",
-        "  end",
-        "  return base",
+        "  return clip_offset + rel + pts_gap_offset",
         "end",
         "",
         "-- Get frame dimensions (diagnostic only)",
@@ -313,40 +309,6 @@ def _generate_lua_script_for_clip(
             lines.append(f"{mask_var}.Height[comp_for_rel({frame})] = {h}")
         if last_kf_frame + 1 < frame_count:
             lines.append(f"{mask_var}.Height[comp_for_rel({last_kf_frame + 1})] = 0")
-
-        # At the transition comp frame (where offset switches), write an
-        # extra keyframe to cover the duplicated source frame.  This
-        # prevents Fusion from interpolating across the gap.
-        if pts_gap_keyframe is not None:
-            lines.append(f"-- Extra keyframe at duplicated frame (transition_comp)")
-            lines.append(f"if transition_comp then")
-            # Find the clip-rel frame just before transition and duplicate it
-            # at the transition comp frame.  Done at Lua level since
-            # transition_comp is computed at runtime.
-            lines.append(
-                f"  local dup_center = {mask_var}:GetInput('Center', transition_comp - 1)"
-            )
-            lines.append(
-                f"  local dup_width = {mask_var}:GetInput('Width', transition_comp - 1)"
-            )
-            lines.append(
-                f"  local dup_height = {mask_var}:GetInput('Height', transition_comp - 1)"
-            )
-            lines.append(
-                f"  if dup_center then"
-            )
-            lines.append(
-                f"    {mask_var}.Center[transition_comp] = dup_center"
-            )
-            lines.append(
-                f"    {mask_var}.Width[transition_comp] = dup_width"
-            )
-            lines.append(
-                f"    {mask_var}.Height[transition_comp] = dup_height"
-            )
-            lines.append(f"    print('  Duplicated keyframe at transition_comp=' .. transition_comp)")
-            lines.append(f"  end")
-            lines.append(f"end")
 
         # Readback diagnostic for the first track only.
         if ti == 0 and kf_data:
