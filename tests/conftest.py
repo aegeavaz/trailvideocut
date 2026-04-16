@@ -1,8 +1,29 @@
+import os
+
+# Ensure Qt can run without a display in CI / headless dev environments.
+# Must be set BEFORE any PySide6 import happens in tests or the app code.
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 import numpy as np
 import pytest
 
 from trailvideocut.audio.models import AudioAnalysis, BeatInfo, MusicSection
 from trailvideocut.video.models import InterestScore, VideoSegment
+
+
+@pytest.fixture(scope="session")
+def qapp():
+    """Session-scoped QApplication for widget tests.
+
+    Skips the test if PySide6 is not installed (the `ui` extras are optional).
+    """
+    pytest.importorskip("PySide6.QtWidgets")
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    return app
 
 
 @pytest.fixture

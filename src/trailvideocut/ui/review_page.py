@@ -45,6 +45,10 @@ class ReviewPage(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        # Page-scoped shortcuts use Qt.WidgetWithChildrenShortcut and the
+        # `_restore_keyboard_focus` helper calls `self.setFocus()`; the page
+        # itself must accept focus for either to work.
+        self.setFocusPolicy(Qt.StrongFocus)
         self._audio: AudioAnalysis | None = None
         self._sections: list[MusicSection] = []
         self._active_clip_end: float | None = None
@@ -1201,6 +1205,7 @@ class ReviewPage(QWidget):
                     f"C:{box.confidence:.0%}"
                 )
                 chip = QPushButton(text)
+                chip.setFocusPolicy(Qt.NoFocus)
                 chip.setCursor(Qt.PointingHandCursor)
                 chip.setStyleSheet(selected_style if i == sel else chip_style)
                 chip.clicked.connect(lambda checked, idx=i: self._on_plate_chip_clicked(idx))
@@ -1215,6 +1220,14 @@ class ReviewPage(QWidget):
             return
         self._plate_overlay.select_box(idx)
         self._refresh_plate_list()
+        self._restore_keyboard_focus()
+
+    def _restore_keyboard_focus(self):
+        # Ensures page-scoped shortcuts keep working after chip interactions.
+        top = self.window()
+        if top is not None:
+            top.activateWindow()
+        self.setFocus()
 
     def _update_plate_overlay_frame(self, position: float):
         """Update the overlay's current frame based on video playback position."""
