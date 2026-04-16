@@ -75,6 +75,22 @@ def _require_ffmpeg() -> str:
     return path
 
 
+def _frame_aligned_duration(decision, fps: float) -> float:
+    """Return the clip's duration quantised to a whole number of output frames.
+
+    Derived from the music target time so cumulative track position after N
+    cuts lands on ``round(target_end_N * fps)`` frames. Falls back to the
+    source delta when the target delta is non-positive.
+    """
+    target_start_f = round(decision.target_start * fps)
+    target_end_f = round(decision.target_end * fps)
+    frames = target_end_f - target_start_f
+    if frames <= 0:
+        # Fall back to source-delta quantisation for malformed inputs.
+        frames = max(1, round((decision.source_end - decision.source_start) * fps))
+    return frames / fps
+
+
 class VideoAssembler:
     """Assemble the final video from a cut plan."""
 
@@ -311,18 +327,29 @@ class VideoAssembler:
         raise RuntimeError(f"Could not determine duration of {filepath}")
 
     def _build_segments(self, plan: CutPlan, source_duration: float):
-        """Build list of (start, duration, clip_index) for each segment."""
+        """Build list of (start, duration, clip_index) for each segment.
+
+        Quantises each segment's duration to an integer number of output
+        frames derived from the music *target* time, so the cumulative
+        track position after N cuts lands at ``round(target_end_N * fps)``
+        instead of accumulating per-clip rounding error.
+        """
         decisions = plan.decisions
         xfade_dur = plan.crossfade_duration
+        fps = self.config.output_fps
+        xfade_frames = round(xfade_dur * fps) if fps > 0 else 0
         n = len(decisions)
         segments = []
         for i, d in enumerate(decisions):
             start = max(0.0, d.source_start)
-            end = min(source_duration, d.source_end)
+            dur = _frame_aligned_duration(d, fps) if fps > 0 else (d.source_end - d.source_start)
             is_last = i == n - 1
-            if not is_last:
-                end = min(source_duration, end + xfade_dur)
-            dur = end - start
+            if not is_last and xfade_frames > 0:
+                dur = dur + xfade_frames / fps
+            # Clamp to available source
+            max_dur = max(0.0, source_duration - start)
+            if dur > max_dur:
+                dur = max_dur
             if dur < 0.05:
                 continue
             segments.append((start, dur, i))
@@ -548,12 +575,21 @@ class VideoAssembler:
     # ------------------------------------------------------------------
 
     def _build_segments_hardcut(self, plan: CutPlan, source_duration: float):
-        """Build list of (start, duration, clip_index) for hard-cut segments."""
+        """Build list of (start, duration, clip_index) for hard-cut segments.
+
+        Quantises each segment's duration to an integer number of output
+        frames derived from the music *target* time, so the cumulative
+        track position after N cuts lands at ``round(target_end_N * fps)``
+        instead of accumulating per-clip rounding error.
+        """
+        fps = self.config.output_fps
         segments = []
         for i, d in enumerate(plan.decisions):
             start = max(0.0, d.source_start)
-            end = min(source_duration, d.source_end)
-            dur = end - start
+            dur = _frame_aligned_duration(d, fps) if fps > 0 else (d.source_end - d.source_start)
+            max_dur = max(0.0, source_duration - start)
+            if dur > max_dur:
+                dur = max_dur
             if dur < 0.05:
                 continue
             segments.append((start, dur, i))

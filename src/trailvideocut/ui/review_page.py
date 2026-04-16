@@ -659,10 +659,12 @@ class ReviewPage(QWidget):
                 self._timeline.update()
                 self._show_clip_info(orig_idx)
         else:
-            # Same clip — check drift and correct if needed
+            # Same clip — check drift and correct if needed. 35 ms is ≈1 frame
+            # at 30 fps; anything looser leaves audible lag between the video
+            # cut and the corresponding music beat.
             current_video_pos = self._player.current_time
             drift = abs(current_video_pos - expected_source_pos)
-            if drift > 0.15 or not music_playing:
+            if drift > 0.035 or not music_playing:
                 self._player.seek_to(expected_source_pos)
                 if music_playing:
                     self._player.play()

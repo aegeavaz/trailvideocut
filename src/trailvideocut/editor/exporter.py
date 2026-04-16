@@ -330,12 +330,18 @@ def _generate_otio_timeline(
     clips = []
     for i, d in enumerate(plan.decisions, start=1):
         clip_start = tc_start + _seconds_to_rational_time(d.source_start, fps)
+        # Quantise duration from cumulative target frames so the Nth cut lands
+        # at round(target_end_N * fps) on the timeline instead of accumulating
+        # per-clip rounding error across the song.
+        target_start_f = round(d.target_start * fps)
+        target_end_f = round(d.target_end * fps)
+        duration_frames = max(1, target_end_f - target_start_f)
         clip = otio.schema.Clip(
             name=f"segment_{i:03d}",
             media_reference=video_media_ref.clone(),
             source_range=otio.opentime.TimeRange(
                 start_time=clip_start,
-                duration=_seconds_to_rational_time(d.source_end - d.source_start, fps),
+                duration=otio.opentime.RationalTime(duration_frames, fps),
             ),
         )
 

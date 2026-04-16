@@ -6,6 +6,12 @@ position always equals the frame the decoder actually displays at that time.
 ``frame_to_position_ms`` uses ceil so the target milliseconds land just past
 the frame boundary; this guarantees that ``position_to_frame`` after a
 millisecond round-trip returns the intended frame even for non-integer FPS.
+
+These helpers are intentionally for *playback clocks* (what frame is on
+screen at time t?). For *event anchoring* — asking what frame an event
+timestamp (e.g. a detected beat) should land on in a rendered timeline —
+use ``round(t * fps)`` instead, matching the OTIO exporter's convention.
+The two differ by up to one frame near boundaries.
 """
 
 import math

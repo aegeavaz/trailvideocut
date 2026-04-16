@@ -182,10 +182,15 @@ def _enforce_max_segment(
     beats: list[BeatInfo],
     max_segment: float,
 ) -> list[BeatInfo]:
-    """Insert synthetic beats to break any gap exceeding max_segment.
+    """Insert cut points to break any gap exceeding max_segment.
 
-    First tries to use existing beats from the full beat list. Falls back to
-    evenly-spaced synthetic beats if no real beat is available.
+    Prefers real detected beats (musical moments) over synthesised timestamps:
+    1. A real beat at or below ``last + max_segment`` (strict cap).
+    2. Otherwise, the closest real beat just past the cap, up to a soft
+       overshoot of ``max_segment * 0.25``. A slightly-longer segment that
+       lands on a musical beat feels more in-sync than a strictly-capped
+       segment that lands on nothing.
+    3. Only as a last resort, an evenly-spaced synthetic timestamp.
     """
     if len(cut_points) < 2:
         return cut_points
@@ -193,13 +198,16 @@ def _enforce_max_segment(
     # Index beats by timestamp for fast lookup
     beat_set = {round(b.timestamp, 6) for b in cut_points}
     result: list[BeatInfo] = [cut_points[0]]
+    overshoot_tolerance = max_segment * 0.25
 
     for cp in cut_points[1:]:
         while cp.timestamp - result[-1].timestamp > max_segment + 1e-9:
             gap = cp.timestamp - result[-1].timestamp
-            # Try to find a real beat near the max_segment boundary
             target = result[-1].timestamp + max_segment
-            best = None
+            soft_target = target + overshoot_tolerance
+
+            in_window: BeatInfo | None = None  # real beat at/below strict cap
+            overshoot: BeatInfo | None = None  # closest real beat past cap
             for b in beats:
                 if b.timestamp <= result[-1].timestamp:
                     continue
@@ -208,12 +216,18 @@ def _enforce_max_segment(
                 if round(b.timestamp, 6) in beat_set:
                     continue
                 if b.timestamp <= target:
-                    best = b
-            if best is not None:
-                result.append(best)
-                beat_set.add(round(best.timestamp, 6))
+                    in_window = b
+                elif overshoot is None and b.timestamp <= soft_target:
+                    overshoot = b
+                    break
+
+            chosen = in_window or overshoot
+            if chosen is not None:
+                result.append(chosen)
+                beat_set.add(round(chosen.timestamp, 6))
             else:
-                # Insert evenly-spaced synthetic beats
+                # No real beats in (last, cp + tolerance]: fall back to an
+                # evenly-spaced synthetic timestamp so the gap is broken.
                 n_splits = math.ceil(gap / max_segment)
                 step = gap / n_splits
                 ts = result[-1].timestamp + step

@@ -344,3 +344,57 @@ class TestTransitionCuts:
             beats, sections, 120.0, 1.0, 8.0, energy_transitions=transitions
         )
         assert len(cuts_with) >= len(base_cuts) + 1
+
+
+class TestEnforceMaxSegmentBeatPreference:
+    """Sync regression: ``_enforce_max_segment`` must prefer real beats over
+    synthesised timestamps whenever a real beat exists in the gap, so cuts
+    land on musical moments rather than arbitrary clock positions."""
+
+    def test_picks_real_beat_in_strict_window(self):
+        # Sparse cut points forcing a gap > max_segment, with real beats
+        # at 0.5s intervals available to fill it.
+        beats = _make_beats(20, interval=0.5)  # beats at 0.0, 0.5, ..., 9.5
+        sections = [MusicSection("verse", 0.0, 10.0, 0.02)]  # very low density
+        result = select_cut_points(beats, sections, 120.0, min_segment=1.0, max_segment=4.0)
+        # Every cut must coincide with a real beat (strength > 0 flags real ones)
+        real_ts = {round(b.timestamp, 6) for b in beats}
+        for cp in result:
+            assert round(cp.timestamp, 6) in real_ts, (
+                f"Cut at {cp.timestamp:.3f}s is synthesised but a real beat "
+                f"was available; strength={cp.strength}"
+            )
+
+    def test_synthetic_only_when_no_real_beat_in_gap(self):
+        # A large gap with NO real beats inside — synthetic fallback is the
+        # only option here.
+        beats = [
+            BeatInfo(timestamp=0.0, strength=0.8, is_downbeat=True),
+            # 15-second dead zone with no detected beats
+            BeatInfo(timestamp=15.0, strength=0.8, is_downbeat=True),
+        ]
+        sections = [MusicSection("verse", 0.0, 15.0, 0.1)]
+        result = select_cut_points(beats, sections, 120.0, min_segment=1.0, max_segment=5.0)
+        # Must have inserted at least one synthetic cut to break the 15s gap.
+        real_ts = {round(b.timestamp, 6) for b in beats}
+        synthetic_cuts = [c for c in result if round(c.timestamp, 6) not in real_ts]
+        assert len(synthetic_cuts) >= 1
+
+    def test_overshoot_within_tolerance_prefers_real_beat(self):
+        # Construct a scenario where the only real beat in the gap lies just
+        # past ``last + max_segment`` but within the 25% overshoot tolerance.
+        # max_segment = 4.0, overshoot_tolerance = 1.0. Real beat at 4.3
+        # (0.3s past strict cap, well within 1.0s tolerance) should win.
+        beats = [
+            BeatInfo(timestamp=0.0, strength=0.8, is_downbeat=True),
+            BeatInfo(timestamp=4.3, strength=0.8, is_downbeat=True),
+            BeatInfo(timestamp=9.0, strength=0.8, is_downbeat=True),
+        ]
+        sections = [MusicSection("verse", 0.0, 9.0, 0.1)]
+        result = select_cut_points(beats, sections, 120.0, min_segment=1.0, max_segment=4.0)
+        timestamps = [round(c.timestamp, 3) for c in result]
+        # 4.3 (real beat) must appear — not a synthetic timestamp near 4.5
+        assert 4.3 in timestamps, (
+            f"Expected overshoot-tolerant real beat at 4.3s to be chosen, "
+            f"got: {timestamps}"
+        )

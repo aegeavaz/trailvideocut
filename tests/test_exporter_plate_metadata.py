@@ -316,6 +316,94 @@ class TestSchemaParity:
 # ---------------------------------------------------------------------------
 
 
+class TestOTIOCumulativeSync:
+    """Sync regression: the timeline position of the Nth cut must match
+    ``round(target_end_N * fps) - round(target_start_0 * fps)`` instead of
+    accumulating per-clip rounding drift."""
+
+    def _plan_from_targets(self, targets: list[tuple[float, float]]) -> CutPlan:
+        """Build a CutPlan where source_start/end mirror target_start/end
+        (align_segment invariant) so the exporter sees realistic input."""
+        decisions = [
+            EditDecision(
+                beat_index=i,
+                source_start=ts,
+                source_end=te,
+                target_start=ts,
+                target_end=te,
+                interest_score=1.0,
+            )
+            for i, (ts, te) in enumerate(targets)
+        ]
+        return CutPlan(
+            decisions=decisions,
+            total_duration=targets[-1][1],
+            song_tempo=143.0,
+            transition_style="hard_cut",
+            crossfade_duration=0.0,
+        )
+
+    def test_fractional_fps_60_cuts_bounded_drift(self, tmp_path):
+        """60 cuts at 23.976 fps with non-frame-aligned beats. Cumulative
+        track position should remain within 1 frame of the target beat."""
+        fps = 24000.0 / 1001.0  # 23.976...
+        # Beats every 0.417s starting at 0.0, like ~143 BPM
+        interval = 0.417
+        targets = [(i * interval, (i + 1) * interval) for i in range(60)]
+        plan = self._plan_from_targets(targets)
+
+        timeline = _generate_otio_timeline(
+            plan,
+            video_path=tmp_path / "src.mp4",
+            video_duration=200.0,
+            audio_path=tmp_path / "audio.mp3",
+            r_frame_rate="24000/1001",
+            timecode=None,
+            fps=fps,
+        )
+        clips = list(timeline.video_tracks()[0].find_clips())
+        assert len(clips) == 60
+
+        # Cumulative sum of clip durations (in frames) == frame distance from
+        # target_start[0] to target_end[i], within ≤1 frame.
+        cumulative_frames = 0
+        start_offset = round(targets[0][0] * fps)
+        for i, clip in enumerate(clips):
+            cumulative_frames += int(clip.source_range.duration.value)
+            expected_frames = round(targets[i][1] * fps) - start_offset
+            drift = abs(cumulative_frames - expected_frames)
+            assert drift <= 1, (
+                f"Cut {i + 1}/60 drift: {cumulative_frames} frames vs "
+                f"expected {expected_frames} frames (diff {drift})"
+            )
+
+    def test_per_clip_duration_is_cumulative_frame_delta(self, tmp_path):
+        """Each clip's duration equals ``round(target_end * fps) -
+        round(target_start * fps)`` — the telescoping form that bounds total
+        drift to one frame."""
+        fps = 30.0
+        targets = [(0.017, 0.533), (0.533, 1.050), (1.050, 1.567)]
+        plan = self._plan_from_targets(targets)
+
+        timeline = _generate_otio_timeline(
+            plan,
+            video_path=tmp_path / "src.mp4",
+            video_duration=10.0,
+            audio_path=tmp_path / "audio.mp3",
+            r_frame_rate="30/1",
+            timecode=None,
+            fps=fps,
+        )
+        clips = list(timeline.video_tracks()[0].find_clips())
+        for i, clip in enumerate(clips):
+            ts, te = targets[i]
+            expected = round(te * fps) - round(ts * fps)
+            assert int(clip.source_range.duration.value) == expected, (
+                f"Clip {i}: duration {clip.source_range.duration.value} != "
+                f"expected {expected}"
+            )
+
+
 class TestGenerateResolveScriptWslPath:
     def test_mnt_c_path_converted_to_windows_drive(self):
         """A /mnt/c/... OTIO path gets converted to a C:\\... Windows path
