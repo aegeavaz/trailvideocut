@@ -12,7 +12,7 @@ Automatically cut motorcycle POV videos to sync with music beats.
 - **Energy-adaptive cuts** — Faster cuts during high-energy sections, longer clips during calm passages
 - **GPU acceleration** — NVIDIA NVENC encoding, hardware decoding, CuPy-accelerated frame scoring
 - **DaVinci Resolve export** — OTIO timeline export for manual refinement in DaVinci Resolve
-- **Must-include marks** — Pin specific timestamps so they always appear in the final edit
+- **Must-include marks** — Pin specific timestamps so they always appear in the final edit; auto-saved as a `{video_stem}.marks.json` sidecar and reloaded when you reopen the video
 - **Exclusion ranges** — Skip boring time spans (mount-up, stops, dead air) so the selector never picks from them
 - **CLI + GUI** — Full Typer CLI for scripting, PySide6 GUI for interactive workflow (Setup → Review → Export)
 
@@ -81,6 +81,25 @@ trailvideocut ui
 1. **Setup** — Load video and audio files, configure transition style and parameters. Use the **Excluded** sub-tab to mark time ranges the clip selector should skip — Start/End buttons (keyboard `I`/`O`) capture the current player position; ranges auto-save to a sidecar and show as shaded red spans on the scrubber.
 2. **Review** — Preview detected beats, adjust must-include marks, tweak segment boundaries
 3. **Export** — Render the final video or export an OTIO timeline for DaVinci Resolve
+
+#### Keyboard shortcuts
+
+Setup page — shortcuts fire while the page is focused:
+
+| Key         | Action                                                |
+| ----------- | ----------------------------------------------------- |
+| `Space`     | Play / pause                                          |
+| `← / →`     | Step one frame back / forward (hold for auto-repeat)  |
+| `↑ / ↓`     | Jump forward / back                                   |
+| `Home / End`| Go to the start / end of the video                    |
+| `A`         | Add a must-include mark at the current frame          |
+| `D`         | Remove the selected mark (or the mark nearest the current frame) |
+| `I / O`     | Capture an exclusion range **I**n / **O**ut point     |
+| `Esc`       | Cancel a pending exclusion range                      |
+
+#### Marks
+
+Must-include marks are timestamps the clip selector always preserves in the final edit — use `A` while scrubbing to pin a beat-aligned moment. Marks auto-save to `{video_stem}.marks.json` next to the video as you add, remove, or clear them, so there is no Save button — reopening the same video restores every mark. To reuse a mark set from a different video, copy its sidecar and rename it to match the new video's stem (e.g. `old.marks.json` → `new.marks.json`).
 
 ## How it works
 

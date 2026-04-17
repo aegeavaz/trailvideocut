@@ -1,4 +1,3 @@
-import json
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
@@ -11,7 +10,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QMessageBox,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -29,6 +27,7 @@ from trailvideocut.video.exclusions import (
     load_exclusions,
     save_exclusions,
 )
+from trailvideocut.video.marks import load_marks, save_marks
 
 _VIDEO_FILTER = "Video Files (*.mp4 *.avi *.mkv *.mov *.webm);;All Files (*)"
 _AUDIO_FILTER = "Audio Files (*.wav *.mp3 *.flac *.ogg *.m4a);;All Files (*)"
@@ -101,15 +100,9 @@ class SetupPage(QWidget):
         self._btn_remove_mark.clicked.connect(self._remove_mark)
         btn_clear_marks = QPushButton("Clear All")
         btn_clear_marks.clicked.connect(self._clear_marks)
-        btn_save_marks = QPushButton("Save Marks")
-        btn_save_marks.clicked.connect(self._save_marks)
-        btn_load_marks = QPushButton("Load Marks")
-        btn_load_marks.clicked.connect(self._load_marks)
         marks_btns.addWidget(btn_add_mark)
         marks_btns.addWidget(self._btn_remove_mark)
         marks_btns.addWidget(btn_clear_marks)
-        marks_btns.addWidget(btn_save_marks)
-        marks_btns.addWidget(btn_load_marks)
         marks_btns.addStretch()
         marks_layout.addLayout(marks_btns)
 
@@ -264,6 +257,7 @@ class SetupPage(QWidget):
             self._video_path.setText(path)
             self._player.load_video(path)
             self._auto_load_exclusions(Path(path))
+            self._auto_load_marks(Path(path))
 
     def _browse_audio(self):
         path, _ = QFileDialog.getOpenFileName(self, "Select Audio", "", _AUDIO_FILTER)
@@ -280,19 +274,42 @@ class SetupPage(QWidget):
         self._marks.append(t)
         self._marks.sort()
         self._refresh_marks_ui()
+        self._persist_marks()
 
     def _clear_marks(self):
         self._marks.clear()
         self._selected_mark_index = -1
         self._btn_remove_mark.setEnabled(False)
         self._refresh_marks_ui()
+        self._persist_marks()
 
     def _remove_mark(self):
-        if 0 <= self._selected_mark_index < len(self._marks):
-            del self._marks[self._selected_mark_index]
-            self._selected_mark_index = -1
-            self._btn_remove_mark.setEnabled(False)
-            self._refresh_marks_ui()
+        # Prefer the chip-selected mark; otherwise fall back to the mark
+        # nearest the current player position so `D` mirrors `A` without
+        # requiring the user to click a chip first.
+        index = self._selected_mark_index
+        if not (0 <= index < len(self._marks)):
+            if not self._marks:
+                return
+            t = self._player.current_time
+            index = min(range(len(self._marks)), key=lambda i: abs(self._marks[i] - t))
+        del self._marks[index]
+        self._selected_mark_index = -1
+        self._btn_remove_mark.setEnabled(False)
+        self._refresh_marks_ui()
+        self._persist_marks()
+
+    def _persist_marks(self):
+        video_text = self._video_path.text().strip()
+        if not video_text:
+            return
+        save_marks(Path(video_text), list(self._marks))
+
+    def _auto_load_marks(self, video_path: Path):
+        self._marks = load_marks(video_path)
+        self._selected_mark_index = -1
+        self._btn_remove_mark.setEnabled(False)
+        self._refresh_marks_ui()
 
     def _select_mark(self, index: int):
         if self._selected_mark_index == index:
@@ -353,41 +370,6 @@ class SetupPage(QWidget):
         self._exclusions_tab.set_ranges(ranges)
         if hasattr(self._player, "set_excluded_ranges"):
             self._player.set_excluded_ranges(list(ranges))
-
-    # --- Save / Load marks ---
-
-    def _save_marks(self):
-        if not self._marks or not self._video_path.text().strip():
-            return
-        video = Path(self._video_path.text().strip())
-        out_path = video.parent / (video.stem + ".marks.json")
-        try:
-            out_path.write_text(json.dumps(self._marks, indent=2))
-        except Exception as exc:
-            QMessageBox.warning(self, "Save Error", str(exc))
-
-    def _load_marks(self):
-        default_dir = ""
-        if self._video_path.text().strip():
-            default_dir = str(Path(self._video_path.text().strip()).parent)
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Load Marks",
-            default_dir,
-            "Marks Files (*.marks.json);;JSON Files (*.json);;All Files (*)",
-        )
-        if not path:
-            return
-        try:
-            data = json.loads(Path(path).read_text())
-            if not isinstance(data, list) or not all(isinstance(v, (int, float)) for v in data):
-                raise ValueError("File must contain a JSON list of numbers")
-            self._marks = sorted(float(v) for v in data)
-            self._selected_mark_index = -1
-            self._btn_remove_mark.setEnabled(False)
-            self._refresh_marks_ui()
-        except Exception as exc:
-            QMessageBox.warning(self, "Load Error", str(exc))
 
     # --- Analyze ---
 

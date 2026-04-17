@@ -164,6 +164,8 @@ class VideoPlayer(QWidget):
 
         # Latest exclusion ranges, repainted on duration change
         self._excluded_ranges: list[tuple[float, float]] = []
+        # Latest must-include marks, repainted on duration change
+        self._mark_timestamps: list[float] = []
 
         self._player.positionChanged.connect(self._on_position_changed)
         self._player.durationChanged.connect(self._on_duration_changed)
@@ -244,7 +246,8 @@ class VideoPlayer(QWidget):
         self.reset_zoom()
 
     def set_marks(self, timestamps: list[float]):
-        self._slider.set_marks(timestamps, self.duration)
+        self._mark_timestamps = list(timestamps)
+        self._slider.set_marks(self._mark_timestamps, self.duration)
 
     def set_excluded_ranges(self, ranges: list[tuple[float, float]]):
         """Render exclusion ranges as shaded spans on the scrubber."""
@@ -494,6 +497,9 @@ class VideoPlayer(QWidget):
         # Re-apply exclusion spans now that duration is known.
         if self._excluded_ranges:
             self._slider.set_excluded_spans(self._excluded_ranges, self.duration)
+        # Re-apply must-include marks now that duration is known.
+        if self._mark_timestamps:
+            self._slider.set_marks(self._mark_timestamps, self.duration)
 
     def _on_position_changed(self, position_ms: int):
         if not self._external_control:
