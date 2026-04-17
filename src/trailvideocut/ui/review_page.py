@@ -16,7 +16,6 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QProgressDialog,
     QPushButton,
-    QSlider,
     QSpacerItem,
     QSizePolicy,
     QVBoxLayout,
@@ -26,6 +25,7 @@ from PySide6.QtWidgets import (
 from trailvideocut.audio.models import AudioAnalysis, MusicSection
 from trailvideocut.editor.models import CutPlan, EditDecision
 from trailvideocut.plate.models import ClipPlateData, PlateBox
+from trailvideocut.plate.projection import project_manual_box
 from trailvideocut.plate.storage import delete_plates, load_plates, save_plates
 from trailvideocut.ui.plate_overlay import PlateOverlayWidget
 from trailvideocut.ui.timeline import TimelineWidget
@@ -1345,9 +1345,22 @@ class ReviewPage(QWidget):
                 self._plate_data[selected] = ClipPlateData(clip_index=selected)
                 self._plate_overlay.set_clip_data(self._plate_data[selected])
 
-        # Clone from nearest detection (prior preferred, then next frame)
-        ref = self._plate_overlay.find_nearest_reference_box()
-        if ref:
+        # Try motion projection from recent detections; fall back to cloning
+        # the single nearest reference if projection isn't usable.
+        clip_data = self._plate_data.get(selected) if selected >= 0 else None
+        projected = None
+        if clip_data is not None:
+            projected = project_manual_box(
+                clip_data.detections,
+                self._plate_overlay._current_frame,
+            )
+
+        if projected is not None:
+            new_box = PlateBox(
+                x=projected.x, y=projected.y, w=projected.w, h=projected.h,
+                confidence=0.0, manual=True,
+            )
+        elif (ref := self._plate_overlay.find_nearest_reference_box()) is not None:
             new_box = PlateBox(
                 x=ref.x, y=ref.y, w=ref.w, h=ref.h,
                 confidence=0.0, manual=True,
