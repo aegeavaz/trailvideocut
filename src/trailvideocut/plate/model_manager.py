@@ -1,5 +1,6 @@
 """Download and cache the plate detection ONNX model."""
 
+import sys
 from pathlib import Path
 import urllib.request
 
@@ -10,6 +11,12 @@ _MODEL_URL = (
     "/resolve/main/best.onnx"
 )
 _MODEL_FILENAME = "plate_detector_yolov8n.onnx"
+
+# Generic YOLOv8n COCO model bundled in the repo for ONNX-backed phone
+# detection. Shipped under `resources/yolov8n.onnx` so onnxruntime-only
+# installs (e.g. Windows DirectML) can run phone filtering without
+# requiring the `ultralytics` + `torch` dependency.
+_COCO_MODEL_FILENAME = "yolov8n.onnx"
 
 
 def get_cache_dir() -> Path:
@@ -22,6 +29,26 @@ def get_cache_dir() -> Path:
 def get_model_path() -> Path | None:
     """Return path to the cached model file, or None if not yet downloaded."""
     path = get_cache_dir() / _MODEL_FILENAME
+    return path if path.exists() else None
+
+
+def get_coco_model_path() -> Path | None:
+    """Return the path to the bundled generic YOLOv8n COCO ONNX model.
+
+    The model ships with the repository under ``resources/yolov8n.onnx`` so
+    it is available on every install without a network fetch. Under
+    PyInstaller the bundled file lives next to ``sys._MEIPASS``. Returns
+    ``None`` if the file is missing.
+    """
+    # Frozen (PyInstaller) builds unpack datas to sys._MEIPASS.
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidate = Path(meipass) / "resources" / _COCO_MODEL_FILENAME
+        if candidate.exists():
+            return candidate
+    # Dev path: src/trailvideocut/plate/ -> src/trailvideocut/ -> src/ -> repo_root/
+    repo_root = Path(__file__).resolve().parents[3]
+    path = repo_root / "resources" / _COCO_MODEL_FILENAME
     return path if path.exists() else None
 
 

@@ -20,3 +20,10 @@ class ClipPlateData:
     clip_index: int
     detections: dict[int, list[PlateBox]] = field(default_factory=dict)
     # frame_number -> list of boxes
+
+    # Debug-only: phone exclusion zones active on each frame during detection.
+    # Keyed by frame number; each value is a list of (x, y, w, h) normalized
+    # tuples. Not persisted to sidecar files (see plate/storage.py).
+    phone_zones: dict[int, list[tuple[float, float, float, float]]] = field(
+        default_factory=dict,
+    )

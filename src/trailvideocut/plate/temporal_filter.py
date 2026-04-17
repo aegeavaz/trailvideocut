@@ -32,9 +32,15 @@ def filter_temporal_continuity(
 
     Returns:
         New ClipPlateData with filtered detections (input is not mutated).
+        Debug-only `phone_zones` from the input are passed through unchanged
+        so the UI overlay can still render them after temporal filtering.
     """
     if not data.detections:
-        return ClipPlateData(clip_index=data.clip_index, detections={})
+        return ClipPlateData(
+            clip_index=data.clip_index,
+            detections={},
+            phone_zones=dict(data.phone_zones),
+        )
 
     # Separate manual vs auto boxes
     manual_by_frame: dict[int, list[PlateBox]] = {}
@@ -112,7 +118,11 @@ def filter_temporal_continuity(
         if result_boxes:
             new_detections[frame] = result_boxes
 
-    return ClipPlateData(clip_index=data.clip_index, detections=new_detections)
+    return ClipPlateData(
+        clip_index=data.clip_index,
+        detections=new_detections,
+        phone_zones=dict(data.phone_zones),
+    )
 
 
 def _center_distance(a: PlateBox, b: PlateBox) -> float:

@@ -19,11 +19,14 @@ else:
     import imageio_ffmpeg
     ffmpeg_data = [(imageio_ffmpeg.get_ffmpeg_exe(), ".")]
 
+_coco_onnx = os.path.join(SPECPATH, "resources", "yolov8n.onnx")
+_resource_data = [(_coco_onnx, "resources")] if os.path.isfile(_coco_onnx) else []
+
 a = Analysis(
     ["launcher.py"],
     pathex=[],
     binaries=ffmpeg_data,
-    datas=copy_metadata("imageio") + copy_metadata("imageio_ffmpeg"),
+    datas=copy_metadata("imageio") + copy_metadata("imageio_ffmpeg") + _resource_data,
     hiddenimports=[
         "librosa",
         "soundfile",

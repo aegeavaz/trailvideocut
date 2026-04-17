@@ -16,11 +16,18 @@ from trailvideocut.plate.storage import (
 
 @pytest.fixture
 def sample_plate_data():
-    """Create sample plate data with two clips."""
+    """Create sample plate data with two clips and some dashboard zones."""
     box1 = PlateBox(x=0.1, y=0.2, w=0.05, h=0.03, confidence=0.92, manual=False)
     box2 = PlateBox(x=0.5, y=0.6, w=0.08, h=0.04, confidence=0.0, manual=True)
     return {
-        0: ClipPlateData(clip_index=0, detections={42: [box1], 43: [box1, box2]}),
+        0: ClipPlateData(
+            clip_index=0,
+            detections={42: [box1], 43: [box1, box2]},
+            phone_zones={
+                42: [(0.2, 0.6, 0.5, 0.3)],
+                43: [(0.2, 0.6, 0.5, 0.3), (0.7, 0.65, 0.2, 0.25)],
+            },
+        ),
         2: ClipPlateData(clip_index=2, detections={100: [box2]}),
     }
 
@@ -59,6 +66,12 @@ class TestRoundTrip:
                     assert gb.h == pytest.approx(ob.h)
                     assert gb.confidence == pytest.approx(ob.confidence)
                     assert gb.manual == ob.manual
+            # Dashboard zones round-trip: same keys, same tuples.
+            assert set(got.phone_zones.keys()) == set(orig.phone_zones.keys())
+            for frame in orig.phone_zones:
+                assert len(got.phone_zones[frame]) == len(orig.phone_zones[frame])
+                for oz, gz in zip(orig.phone_zones[frame], got.phone_zones[frame]):
+                    assert gz == pytest.approx(oz)
 
 
 class TestLoadValidation:
@@ -89,6 +102,92 @@ class TestLoadValidation:
         loaded = load_plates(video, valid_clip_indices={0})
         assert 0 in loaded
         assert 2 not in loaded
+
+
+class TestPhoneZonesPersisted:
+    """Dashboard zones SHALL be written to the v2 sidecar alongside plates."""
+
+    def test_zones_in_json(self, tmp_path):
+        video = tmp_path / "trail.mp4"
+        video.touch()
+
+        data_with_zones = {
+            0: ClipPlateData(
+                clip_index=0,
+                detections={42: [PlateBox(0.1, 0.2, 0.05, 0.03, 0.9)]},
+                phone_zones={42: [(0.3, 0.4, 0.2, 0.2)]},
+            ),
+        }
+        save_plates(video, data_with_zones)
+
+        sidecar = get_plates_path(video)
+        raw = json.loads(sidecar.read_text(encoding="utf-8"))
+        assert raw["version"] == 2
+        clip = raw["clips"]["0"]
+        assert "phone_zones" in clip
+        assert clip["phone_zones"]["42"] == [[0.3, 0.4, 0.2, 0.2]]
+
+    def test_round_trip_preserves_zones(self, tmp_path):
+        video = tmp_path / "trail.mp4"
+        video.touch()
+
+        zones = [(0.3, 0.4, 0.2, 0.2), (0.55, 0.7, 0.1, 0.1)]
+        data_with_zones = {
+            0: ClipPlateData(
+                clip_index=0,
+                detections={42: [PlateBox(0.1, 0.2, 0.05, 0.03, 0.9)]},
+                phone_zones={42: zones},
+            ),
+        }
+        save_plates(video, data_with_zones)
+        loaded = load_plates(video)
+
+        assert 0 in loaded
+        assert set(loaded[0].phone_zones.keys()) == {42}
+        got = loaded[0].phone_zones[42]
+        assert len(got) == len(zones)
+        for oz, gz in zip(zones, got):
+            assert gz == pytest.approx(oz)
+
+    def test_empty_zones_key_omitted_from_json(self, tmp_path):
+        """Clips with no zones should not carry an empty `phone_zones` key."""
+        video = tmp_path / "trail.mp4"
+        video.touch()
+
+        data = {
+            0: ClipPlateData(
+                clip_index=0,
+                detections={1: [PlateBox(0.1, 0.2, 0.05, 0.03, 0.9)]},
+                phone_zones={},
+            ),
+        }
+        save_plates(video, data)
+        raw = json.loads(get_plates_path(video).read_text(encoding="utf-8"))
+        assert "phone_zones" not in raw["clips"]["0"]
+
+    def test_v1_file_loads_with_empty_zones(self, tmp_path):
+        """Backward compat: old v1 sidecars still load; zones default empty."""
+        video = tmp_path / "trail.mp4"
+        video.touch()
+        sidecar = tmp_path / "trail.plates.json"
+        sidecar.write_text(json.dumps({
+            "version": 1,
+            "video_file": "trail.mp4",
+            "clips": {
+                "0": {
+                    "clip_index": 0,
+                    "detections": {
+                        "42": [{"x": 0.1, "y": 0.2, "w": 0.05, "h": 0.03,
+                                "confidence": 0.9, "manual": False}],
+                    },
+                },
+            },
+        }), encoding="utf-8")
+
+        loaded = load_plates(video)
+        assert 0 in loaded
+        assert len(loaded[0].detections[42]) == 1
+        assert loaded[0].phone_zones == {}
 
 
 class TestDeletePlates:

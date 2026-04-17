@@ -213,11 +213,13 @@ def detect_plates(
     ),
     exclude_phones: bool = typer.Option(
         True, "--exclude-phones/--no-exclude-phones",
-        help="Auto-detect phones/GPS devices and exclude from plate results",
+        help="Exclude the user's own bike/dashboard/mounted-phone area "
+             "(bottom of frame) from plate results",
     ),
     phone_gap: int = typer.Option(
         30, "--phone-gap",
-        help="Re-detect phone every N frames (lower = more accurate, slower)",
+        help="Re-detect dashboard zone every N frames "
+             "(lower = more accurate, slower)",
     ),
     continuity_filter: bool = typer.Option(
         True, "--continuity-filter/--no-continuity-filter",

@@ -220,19 +220,39 @@ class ReviewPage(QWidget):
         self._spin_confidence.setToolTip("Minimum confidence threshold for plate detection")
         settings_row.addWidget(self._spin_confidence)
 
-        self._chk_exclude_phones = QCheckBox("Exclude Phone")
+        self._chk_exclude_phones = QCheckBox("Exclude Dashboard")
         self._chk_exclude_phones.setChecked(True)
-        self._chk_exclude_phones.setToolTip("Exclude detected phone/device regions from plate results")
+        self._chk_exclude_phones.setToolTip(
+            "Exclude the user's own bike / dashboard / mounted-phone area at "
+            "the bottom of the frame from plate results",
+        )
         settings_row.addWidget(self._chk_exclude_phones)
 
         settings_row.addWidget(QLabel("Gap:"))
         self._spin_phone_gap = QSpinBox()
         self._spin_phone_gap.setRange(5, 120)
-        self._spin_phone_gap.setValue(30)
+        self._spin_phone_gap.setValue(5)
         self._spin_phone_gap.setSingleStep(5)
         self._spin_phone_gap.setToolTip("Re-detect phone every N frames (lower = more accurate, slower)")
         settings_row.addWidget(self._spin_phone_gap)
         self._chk_exclude_phones.toggled.connect(self._spin_phone_gap.setEnabled)
+        self._chk_exclude_phones.toggled.connect(
+            lambda _checked: self._update_show_phone_filter_enabled(),
+        )
+
+        self._chk_show_phone_filter = QCheckBox("Show Dashboard Filter")
+        self._chk_show_phone_filter.setChecked(True)
+        self._chk_show_phone_filter.setEnabled(False)
+        self._chk_show_phone_filter.setToolTip(
+            "Overlay the dashboard exclusion zone on the video. Enabled after "
+            "running plate detection with 'Exclude Dashboard' on, provided a "
+            "zone was detected in the clip. Zones are not saved to disk — "
+            "re-run detection after reopening the app.",
+        )
+        self._chk_show_phone_filter.toggled.connect(
+            self._on_show_phone_filter_toggled,
+        )
+        settings_row.addWidget(self._chk_show_phone_filter)
 
         self._chk_debug_plates = QCheckBox("Debug")
         self._chk_debug_plates.setToolTip("Print plate detection debug info to the console")
@@ -1050,6 +1070,18 @@ class ReviewPage(QWidget):
                 frame_range = f"{frames[0]}-{frames[-1]}" if frames else "none"
                 print(f"[PlateDetect] Clip {clip_idx}: {total} boxes in "
                       f"{len(frames)} frames (range: {frame_range})")
+                zone_frame_count = len(data.phone_zones)
+                zone_total = sum(len(z) for z in data.phone_zones.values())
+                print(f"[PlateDetect] Clip {clip_idx}: dashboard filter "
+                      f"recorded {zone_total} zone entries across "
+                      f"{zone_frame_count} frames")
+                if zone_total == 0 and self._chk_exclude_phones.isChecked():
+                    print("[PlateDetect] Hint: 'Exclude Dashboard' is on but "
+                          "no zones were recorded. The dashboard heuristic "
+                          "expects a large motorcycle-class detection near "
+                          "the bottom of the frame (area>=4%, bottom>=85%). "
+                          "If your camera mount doesn't show the bike body, "
+                          "try widening the scope or drop the feature.")
 
         # Reset progress, re-enable button
         self._plate_progress_bar.setValue(0)
@@ -1090,6 +1122,57 @@ class ReviewPage(QWidget):
         if show:
             self._position_overlay()
 
+    def _on_show_phone_filter_toggled(self, checked: bool):
+        """Toggle phone-zone debug rendering on the overlay."""
+        self._plate_overlay.set_phone_zones_visible(checked)
+        if checked:
+            self._push_phone_zones_for_current_frame()
+
+    def _current_clip_plate_data(self) -> ClipPlateData | None:
+        """Return the ClipPlateData currently driving the overlay, or None."""
+        selected = self._timeline.selected_index
+        if selected >= 0 and selected in self._plate_data:
+            return self._plate_data[selected]
+        current_time = self._player.current_time
+        for i, clip in enumerate(self._timeline.clips):
+            if clip.source_start <= current_time <= clip.source_end:
+                return self._plate_data.get(i)
+        return None
+
+    def _push_phone_zones_for_current_frame(self):
+        """Push phone zones for the overlay's current frame into the widget."""
+        clip_data = self._current_clip_plate_data()
+        if clip_data is None:
+            self._plate_overlay.clear_phone_zones()
+            return
+        frame_num = self._plate_overlay._current_frame
+        zones = clip_data.phone_zones.get(frame_num, [])
+        self._plate_overlay.set_phone_zones(zones)
+
+    def _update_show_phone_filter_enabled(self):
+        """Enable the Show Phone Filter checkbox only when Exclude Phone is
+        active AND the current clip has recorded zones. When zones become
+        available and the checkbox is checked (default), push the zones to
+        the overlay so the user sees them immediately.
+        """
+        clip_data = self._current_clip_plate_data()
+        has_zones = bool(clip_data is not None and clip_data.phone_zones)
+        enable = self._chk_exclude_phones.isChecked() and has_zones
+        self._chk_show_phone_filter.setEnabled(enable)
+        if not enable:
+            # Feature can't render: hide and clear whatever the overlay has.
+            self._plate_overlay.set_phone_zones_visible(False)
+            self._plate_overlay.clear_phone_zones()
+        else:
+            # Sync overlay visibility to the current checkbox state so the
+            # default-on value takes effect on first enable without needing
+            # a click from the user.
+            self._plate_overlay.set_phone_zones_visible(
+                self._chk_show_phone_filter.isChecked(),
+            )
+            if self._chk_show_phone_filter.isChecked():
+                self._push_phone_zones_for_current_frame()
+
     def _sync_overlay_to_current_clip(self):
         """Set the overlay's clip data based on the currently selected/active clip."""
         self._ensure_video_dims()
@@ -1114,6 +1197,8 @@ class ReviewPage(QWidget):
         self._position_overlay()
         frame_num = self._player.frame_at(self._player.current_time)
         self._plate_overlay.set_current_frame(frame_num, force=True)
+        self._push_phone_zones_for_current_frame()
+        self._update_show_phone_filter_enabled()
         self._refresh_plate_list()
         self._update_frame_buttons()
 
@@ -1236,6 +1321,7 @@ class ReviewPage(QWidget):
             return
         frame_num = self._player.frame_at(position)
         self._plate_overlay.set_current_frame(frame_num)
+        self._push_phone_zones_for_current_frame()
         self._position_overlay()
         self._schedule_plate_list_refresh()
         self._update_frame_buttons()
@@ -1388,6 +1474,7 @@ class ReviewPage(QWidget):
             delete_plates(self._video_path)
         self._plate_data = {}
         self._plate_overlay.set_clip_data(None)
+        self._plate_overlay.clear_phone_zones()
         self._plate_overlay.setVisible(False)
         self._chk_show_plates.setEnabled(False)
         self._btn_add_plate.setEnabled(False)
@@ -1395,6 +1482,7 @@ class ReviewPage(QWidget):
         self._btn_detect_frame.setEnabled(False)
         self._btn_clear_clip_plates.setEnabled(False)
         self._btn_clear_frame_plates.setEnabled(False)
+        self._update_show_phone_filter_enabled()
         self._lbl_plate_status.setText("")
         self._refresh_plate_list()
 
@@ -1504,6 +1592,13 @@ class ReviewPage(QWidget):
         elif frame_num in clip_data.detections:
             del clip_data.detections[frame_num]
 
+        # Record debug phone zones active on this single-frame detection
+        active_zones = detector.current_phone_zones
+        if active_zones:
+            clip_data.phone_zones[frame_num] = active_zones
+        elif frame_num in clip_data.phone_zones:
+            del clip_data.phone_zones[frame_num]
+
         self._save_plates()
 
         # Enable plate UI and refresh
@@ -1538,6 +1633,7 @@ class ReviewPage(QWidget):
             if self._video_path:
                 delete_plates(self._video_path)
             self._plate_overlay.set_clip_data(None)
+            self._plate_overlay.clear_phone_zones()
             self._plate_overlay.setVisible(False)
             self._chk_show_plates.setEnabled(False)
             self._btn_add_plate.setEnabled(False)
@@ -1545,6 +1641,7 @@ class ReviewPage(QWidget):
             self._btn_detect_frame.setEnabled(False)
             self._btn_clear_clip_plates.setEnabled(False)
             self._btn_clear_frame_plates.setEnabled(False)
+            self._update_show_phone_filter_enabled()
         else:
             self._save_plates()
             self._sync_overlay_to_current_clip()

@@ -8,7 +8,8 @@ from pathlib import Path
 
 from trailvideocut.plate.models import ClipPlateData, PlateBox
 
-_VERSION = 1
+_VERSION = 2  # v2 adds per-clip phone_zones; v1 files still load with empty zones.
+_SUPPORTED_VERSIONS = {1, 2}
 logger = logging.getLogger(__name__)
 
 
@@ -46,10 +47,17 @@ def save_plates(
                 }
                 for b in boxes
             ]
-        payload["clips"][str(clip_idx)] = {
+        clip_payload: dict = {
             "clip_index": cpd.clip_index,
             "detections": detections,
         }
+        if cpd.phone_zones:
+            clip_payload["phone_zones"] = {
+                str(frame): [[float(z[0]), float(z[1]), float(z[2]), float(z[3])]
+                             for z in zones]
+                for frame, zones in cpd.phone_zones.items()
+            }
+        payload["clips"][str(clip_idx)] = clip_payload
     try:
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     except PermissionError:
@@ -75,7 +83,7 @@ def load_plates(
         logger.warning("Failed to read plates file %s: %s", path, exc)
         return {}
 
-    if not isinstance(raw, dict) or raw.get("version") != _VERSION:
+    if not isinstance(raw, dict) or raw.get("version") not in _SUPPORTED_VERSIONS:
         logger.warning("Unsupported plates file version in %s", path)
         return {}
 
@@ -107,7 +115,23 @@ def load_plates(
                 )
             if boxes:
                 detections[frame_num] = boxes
-        result[clip_idx] = ClipPlateData(clip_index=clip_idx, detections=detections)
+        phone_zones: dict[int, list[tuple[float, float, float, float]]] = {}
+        for frame_key, zone_list in clip_obj.get("phone_zones", {}).items():
+            try:
+                frame_num = int(frame_key)
+            except (ValueError, TypeError):
+                continue
+            parsed = []
+            for z in zone_list:
+                if isinstance(z, (list, tuple)) and len(z) == 4:
+                    parsed.append((float(z[0]), float(z[1]), float(z[2]), float(z[3])))
+            if parsed:
+                phone_zones[frame_num] = parsed
+        result[clip_idx] = ClipPlateData(
+            clip_index=clip_idx,
+            detections=detections,
+            phone_zones=phone_zones,
+        )
 
     return result
 

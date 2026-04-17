@@ -63,6 +63,11 @@ class PlateOverlayWidget(QWidget):
         # Blur preview tiles: list of (norm_rect, QPixmap)
         self._blur_tiles: list[tuple[tuple[float, float, float, float], QPixmap]] = []
 
+        # Phone-filter debug zones: normalized (x, y, w, h) rects drawn as
+        # read-only debug geometry; never participate in hit-testing.
+        self._phone_zones: list[tuple[float, float, float, float]] = []
+        self._phone_zones_visible: bool = False
+
         # Zoom/pan state
         self._effective_video_rect: QRectF | None = None
         self._zoom_level: float = 1.0
@@ -256,6 +261,38 @@ class PlateOverlayWidget(QWidget):
             self._blur_tiles.clear()
             self.update()
 
+    # --- Phone-filter debug zones ---
+
+    def set_phone_zones(
+        self,
+        zones: list[tuple[float, float, float, float]],
+    ):
+        """Set the phone-filter exclusion zones to draw for the current frame.
+
+        Each zone is a normalized ``(x, y, w, h)`` tuple. Passing an empty
+        list clears the zones. The overlay repaints only when the value
+        actually changes.
+        """
+        new_zones = list(zones)
+        if new_zones != self._phone_zones:
+            self._phone_zones = new_zones
+            self.update()
+
+    def clear_phone_zones(self):
+        """Remove all phone-filter debug zones for the current frame."""
+        if self._phone_zones:
+            self._phone_zones = []
+            self.update()
+
+    def set_phone_zones_visible(self, visible: bool):
+        """Toggle whether phone-filter debug zones are drawn. Independent of
+        plate-box visibility.
+        """
+        v = bool(visible)
+        if v != self._phone_zones_visible:
+            self._phone_zones_visible = v
+            self.update()
+
     # --- Coordinate mapping ---
 
     def _video_rect(self) -> QRectF:
@@ -320,6 +357,16 @@ class PlateOverlayWidget(QWidget):
         # fully transparent pixels).
         vr = self._video_rect()
         painter.fillRect(vr, QColor(0, 0, 0, 1))
+
+        # Draw phone-filter debug zones first so blur tiles and plate boxes
+        # layer on top of them. Zones are non-interactive debug geometry.
+        if self._phone_zones_visible and self._phone_zones:
+            zone_pen = QPen(QColor(0xE0, 0x40, 0xFB), 2, Qt.DashLine)
+            zone_fill = QColor(0xE0, 0x40, 0xFB, 30)
+            painter.setPen(zone_pen)
+            painter.setBrush(QBrush(zone_fill))
+            for nx, ny, nw, nh in self._phone_zones:
+                painter.drawRect(self._norm_to_widget(nx, ny, nw, nh))
 
         # Draw blur preview tiles (before boxes so borders are visible on top)
         for (nx, ny, nw, nh), pixmap in self._blur_tiles:

@@ -68,11 +68,19 @@ class PlateDetector:
     PLATE_ASPECT_MIN = 0.5  # min width/height ratio (motorcycle plates can be ~1.2-1.4)
     PLATE_ASPECT_MAX = 2.0  # max width/height ratio
 
-    # Phone exclusion
-    _PHONE_CLASSES = {67}  # COCO class IDs: 67 = "cell phone"
-    _PHONE_CONF = 0.15     # confidence threshold for phone detection (low is OK, few false positives)
-    _PHONE_PAD = 0.2       # pad the phone box by 20% on each side
-    _PHONE_REDETECT_EVERY = 30  # re-run phone detection every N frames
+    # "Dashboard" exclusion: masks the user's own bike / mounted phone area at
+    # the bottom of the frame. COCO 'cell phone' (class 67) is unreliable for
+    # dashboard-mounted GPS phones — yolov8n misclassifies them as 'cup', etc.
+    # Empirically YOLO consistently classifies the dashboard region as a
+    # motorcycle (class 3), so we use that class and a position/area filter
+    # (bottom of frame, large area) to distinguish the user's own bike from
+    # other riders in the scene.
+    _PHONE_CLASSES = {3}           # COCO class IDs: 3 = "motorcycle"
+    _PHONE_CONF = 0.20             # min class-score for candidate detections
+    _PHONE_MIN_BOTTOM_FRAC = 0.85  # detection bottom-edge must be this far down
+    _PHONE_MIN_AREA_FRAC = 0.04    # detection must cover this fraction of the frame
+    _PHONE_PAD = 0.2               # pad the zone by 20% on each side
+    _PHONE_REDETECT_EVERY = 30     # re-run detection every N frames
 
     def __init__(
         self,
@@ -97,7 +105,8 @@ class PlateDetector:
         self._min_plate_px_w = min_plate_px_w
         self._min_plate_px_h = min_plate_px_h
         self._phone_zones: list[tuple[float, float, float, float]] = []
-        self._phone_model: YOLO | None = None  # type: ignore[name-defined]
+        self._phone_ort_session = None  # onnxruntime.InferenceSession | None
+        self._phone_model_loaded: bool = False
         self._phone_frame_counter = 0
         self._current_frame_num: int = -1  # for verbose logging context
         self._frame_header_printed: bool = False
@@ -272,44 +281,203 @@ class PlateDetector:
     # --- Phone / device exclusion ---
 
     def _ensure_phone_model(self) -> None:
-        """Lazily load the standard YOLOv8n COCO model for phone detection."""
-        if self._phone_model is not None:
+        """Lazily load the bundled YOLOv8n COCO ONNX model for phone detection.
+
+        Runs under onnxruntime only — same stack the plate model uses on
+        DirectML / CUDA / CPU. Silent no-op if onnxruntime is unavailable or
+        the bundled ``resources/yolov8n.onnx`` file is missing.
+        """
+        if self._phone_model_loaded:
             return
-        if not _HAS_ULTRALYTICS:
-            return  # phone exclusion requires ultralytics
-        self._phone_model = YOLO("yolov8n.pt")
-        device = getattr(self, "_device", "cpu")
-        # Warm up on a tiny dummy image
-        dummy = np.zeros((64, 64, 3), dtype=np.uint8)
-        self._phone_model.predict(dummy, device=device, verbose=False)
+        self._phone_model_loaded = True
+
+        if not _HAS_ORT:
+            if self._verbose:
+                print(
+                    "[PlateDetect] Phone filtering disabled: onnxruntime is "
+                    "not installed.",
+                )
+            return
+
+        from trailvideocut.plate.model_manager import get_coco_model_path
+        coco_path = get_coco_model_path()
+        if coco_path is None:
+            if self._verbose:
+                print(
+                    "[PlateDetect] Phone filtering disabled: "
+                    "resources/yolov8n.onnx missing from install.",
+                )
+            return
+
+        try:
+            providers = []
+            available = ort.get_available_providers()
+            if "CUDAExecutionProvider" in available:
+                providers.append("CUDAExecutionProvider")
+            if "DmlExecutionProvider" in available:
+                providers.append("DmlExecutionProvider")
+            providers.append("CPUExecutionProvider")
+            self._phone_ort_session = ort.InferenceSession(
+                str(coco_path), providers=providers,
+            )
+            if self._verbose:
+                active = self._phone_ort_session.get_providers()
+                print(f"[PlateDetect] Phone backend: onnxruntime ({active[0]})")
+        except Exception as exc:
+            if self._verbose:
+                print(f"[PlateDetect] Failed to load phone ONNX model: {exc}")
+            self._phone_ort_session = None
 
     def detect_phones(self, frame: np.ndarray) -> list[tuple[float, float, float, float]]:
         """Detect phones/devices in frame. Returns list of padded (x, y, w, h) normalized zones."""
         self._ensure_phone_model()
-        if self._phone_model is None:
+        if self._phone_ort_session is None:
             return []
+        return self._detect_phones_ort(frame)
+
+    def _detect_phones_ort(
+        self, frame: np.ndarray,
+    ) -> list[tuple[float, float, float, float]]:
+        """Run the bundled YOLOv8n COCO ONNX model and return dashboard zones.
+
+        Output tensor shape is ``(1, 84, 8400)``: channels 0-3 are
+        ``cx, cy, w, h`` in input (letterboxed) pixel space, and channels
+        4-83 are the 80 COCO class scores (sigmoid already applied). We
+        keep anchors whose argmax class is in ``_PHONE_CLASSES`` (currently
+        motorcycle). Then we filter by bottom-of-frame position and area so
+        only the user's own bike/dashboard is retained, not other riders.
+        """
         h, w = frame.shape[:2]
-        results = self._phone_model.predict(
-            frame, conf=self._PHONE_CONF,
-            device=getattr(self, "_device", "cpu"),
-            verbose=False,
+        letterboxed, ratio, (pad_w, pad_h) = self._letterbox(frame)
+        blob = letterboxed.astype(np.float32) / 255.0
+        blob = blob[:, :, ::-1]  # BGR -> RGB
+        blob = blob.transpose(2, 0, 1)[np.newaxis]
+        blob = np.ascontiguousarray(blob)
+        input_name = self._phone_ort_session.get_inputs()[0].name
+        outputs = self._phone_ort_session.run(None, {input_name: blob})[0]
+
+        preds = outputs[0]  # (84, 8400)
+        class_scores = preds[4:]                    # (80, 8400)
+        top_cls = class_scores.argmax(axis=0)       # (8400,)
+        top_conf = class_scores.max(axis=0)         # (8400,)
+
+        cls_mask = np.isin(top_cls, list(self._PHONE_CLASSES))
+        conf_mask = top_conf >= self._PHONE_CONF
+        keep_mask = cls_mask & conf_mask
+        if not keep_mask.any():
+            return []
+
+        cxs = preds[0, keep_mask]
+        cys = preds[1, keep_mask]
+        ws = preds[2, keep_mask]
+        hs = preds[3, keep_mask]
+        confs = top_conf[keep_mask]
+
+        boxes_px = np.stack(
+            [cxs - ws / 2, cys - hs / 2, cxs + ws / 2, cys + hs / 2],
+            axis=1,
         )
-        zones = []
-        for r in results:
-            for box in r.boxes:
-                cls_id = int(box.cls[0].cpu())
-                if cls_id not in self._PHONE_CLASSES:
-                    continue
-                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                bw, bh = x2 - x1, y2 - y1
-                # Pad the zone
-                px, py = bw * self._PHONE_PAD, bh * self._PHONE_PAD
-                nx = max(0, (x1 - px)) / w
-                ny = max(0, (y1 - py)) / h
-                nw = min(w, bw + 2 * px) / w
-                nh = min(h, bh + 2 * py) / h
-                zones.append((nx, ny, nw, nh))
-        return zones
+        keep = self._nms_xyxy(boxes_px, confs, iou_threshold=0.5)
+
+        raw_boxes: list[tuple[float, float, float, float]] = []
+        for i in keep:
+            x1p, y1p, x2p, y2p = boxes_px[i]
+            # Undo letterboxing back to original-image coordinates
+            x1 = (x1p - pad_w) / ratio
+            y1 = (y1p - pad_h) / ratio
+            x2 = (x2p - pad_w) / ratio
+            y2 = (y2p - pad_h) / ratio
+            # Reject anything that isn't near the bottom + large enough to be
+            # the user's own bike rather than another rider.
+            bottom_frac = y2 / h
+            area_frac = max(0.0, (x2 - x1)) * max(0.0, (y2 - y1)) / max(1, w * h)
+            if bottom_frac < self._PHONE_MIN_BOTTOM_FRAC:
+                continue
+            if area_frac < self._PHONE_MIN_AREA_FRAC:
+                continue
+            raw_boxes.append((x1, y1, x2, y2))
+
+        # Merge overlapping survivors into their union bounding box so the
+        # overlay shows one clean zone per dashboard rather than nested
+        # rectangles. Filtering semantics (union) are preserved.
+        merged = self._merge_overlapping_boxes(raw_boxes)
+        return [
+            self._pad_phone_zone(x1, y1, x2 - x1, y2 - y1, w, h)
+            for x1, y1, x2, y2 in merged
+        ]
+
+    @staticmethod
+    def _merge_overlapping_boxes(
+        boxes: list[tuple[float, float, float, float]],
+    ) -> list[tuple[float, float, float, float]]:
+        """Iteratively merge any two boxes that overlap into their union bbox.
+
+        Two boxes "overlap" when their intersection has positive area. Runs in
+        O(N²) which is fine for the handful of zones per frame we deal with.
+        """
+        merged = list(boxes)
+        changed = True
+        while changed:
+            changed = False
+            for i in range(len(merged)):
+                for j in range(i + 1, len(merged)):
+                    ax1, ay1, ax2, ay2 = merged[i]
+                    bx1, by1, bx2, by2 = merged[j]
+                    if min(ax2, bx2) > max(ax1, bx1) and min(ay2, by2) > max(ay1, by1):
+                        merged[i] = (
+                            min(ax1, bx1), min(ay1, by1),
+                            max(ax2, bx2), max(ay2, by2),
+                        )
+                        merged.pop(j)
+                        changed = True
+                        break
+                if changed:
+                    break
+        return merged
+
+    def _pad_phone_zone(
+        self, x1: float, y1: float, bw: float, bh: float, w: int, h: int,
+    ) -> tuple[float, float, float, float]:
+        """Pad a dashboard bounding box and return as normalized coordinates.
+
+        Padding applies to the left, right, and bottom sides only — NOT the
+        top. The dashboard / mounted-phone area is at the bottom of the frame;
+        extending the zone upward risks catching a rider further ahead on the
+        same trail, causing their plate to be wrongly filtered.
+        """
+        px, py = bw * self._PHONE_PAD, bh * self._PHONE_PAD
+        nx = max(0.0, (x1 - px)) / w
+        ny = max(0.0, y1) / h  # no top padding
+        nw = min(float(w), bw + 2 * px) / w
+        # Height = original + bottom padding only, clamped to frame bottom.
+        nh = min(float(h) - max(0.0, y1), bh + py) / h
+        return (nx, ny, nw, nh)
+
+    @staticmethod
+    def _nms_xyxy(boxes: np.ndarray, scores: np.ndarray, iou_threshold: float) -> list[int]:
+        """Plain NMS on an (N, 4) xyxy array. Returns indices to keep."""
+        if len(boxes) == 0:
+            return []
+        order = np.argsort(-scores)
+        keep: list[int] = []
+        while len(order) > 0:
+            i = int(order[0])
+            keep.append(i)
+            if len(order) == 1:
+                break
+            xx1 = np.maximum(boxes[i, 0], boxes[order[1:], 0])
+            yy1 = np.maximum(boxes[i, 1], boxes[order[1:], 1])
+            xx2 = np.minimum(boxes[i, 2], boxes[order[1:], 2])
+            yy2 = np.minimum(boxes[i, 3], boxes[order[1:], 3])
+            inter = np.maximum(0.0, xx2 - xx1) * np.maximum(0.0, yy2 - yy1)
+            area_i = (boxes[i, 2] - boxes[i, 0]) * (boxes[i, 3] - boxes[i, 1])
+            area_rest = (
+                (boxes[order[1:], 2] - boxes[order[1:], 0])
+                * (boxes[order[1:], 3] - boxes[order[1:], 1])
+            )
+            iou = inter / np.maximum(area_i + area_rest - inter, 1e-9)
+            order = order[1:][iou < iou_threshold]
+        return keep
 
     def update_phone_zones(self, frame: np.ndarray) -> None:
         """Re-detect phone zones if enough frames have elapsed.
@@ -329,6 +497,16 @@ class PlateDetector:
         # Once found, periodically refresh (clear if phone disappears)
         if self._phone_frame_counter % self._phone_redetect_every == 0:
             self._phone_zones = self.detect_phones(frame)
+
+    @property
+    def current_phone_zones(self) -> list[tuple[float, float, float, float]]:
+        """Return a copy of the phone exclusion zones active on the last
+        processed frame. Empty list when ``exclude_phones`` is disabled or no
+        phone has been detected yet. For single-frame callers
+        (``detect_frame`` / ``detect_frame_tiled``) this lets the UI overlay
+        the zone that the filter just used without reaching into private state.
+        """
+        return list(self._phone_zones)
 
     def _filter_phone_zones(self, boxes: list[PlateBox]) -> list[PlateBox]:
         """Remove plate detections whose center falls inside a phone exclusion zone."""
@@ -474,6 +652,8 @@ class PlateDetector:
                 best = max(b.confidence for b in boxes)
                 if best > max_conf_seen:
                     max_conf_seen = best
+            if self._exclude_phones and self._phone_zones:
+                result.phone_zones[frame_num] = list(self._phone_zones)
             frames_done += 1
             if progress_callback:
                 progress_callback(frames_done, total_frames)

@@ -1,6 +1,7 @@
 """Tests for the plate overlay widget coordinate mapping and box manipulation."""
 
 import pytest
+
 from trailvideocut.plate.models import ClipPlateData, PlateBox
 
 
@@ -189,3 +190,91 @@ class TestFindNearestReferenceBox:
         data = ClipPlateData(clip_index=0, detections={})
         result = self._find_nearest_reference_box(data, current_frame=10)
         assert result is None
+
+
+class TestPhoneFilterDebugOverlay:
+    """Render and input-isolation tests for phone-zone debug rendering."""
+
+    @staticmethod
+    def _magenta_threshold(pixel) -> bool:
+        """Pixel is QColor-like; true when the fill tint lies in the magenta quadrant."""
+        return pixel.red() > pixel.green() and pixel.blue() > pixel.green()
+
+    def _make_overlay(self, qapp):
+        from trailvideocut.ui.plate_overlay import PlateOverlayWidget
+
+        w = PlateOverlayWidget(None)
+        w.set_video_size(1920, 1080)
+        w.resize(1920, 1080)
+        # Keep window hidden (WA_DontShowOnScreen) to avoid showing during tests.
+        from PySide6.QtCore import Qt
+        w.setAttribute(Qt.WA_DontShowOnScreen, True)
+        w.show()
+        qapp.processEvents()
+        return w
+
+    def test_set_phone_zones_renders_magenta_rect(self, qapp):
+        from PySide6.QtGui import QImage
+
+        overlay = self._make_overlay(qapp)
+        overlay.set_phone_zones([(0.1, 0.2, 0.3, 0.4)])
+        overlay.set_phone_zones_visible(True)
+        qapp.processEvents()
+
+        img = QImage(overlay.size(), QImage.Format_ARGB32)
+        img.fill(0)
+        overlay.render(img)
+
+        # Center of the zone: x = (0.1 + 0.3/2) = 0.25 → 480 px
+        #                    y = (0.2 + 0.4/2) = 0.40 → 432 px
+        pixel = img.pixelColor(480, 432)
+        # Translucent magenta over a transparent background should retain
+        # the magenta tint (R+B > G).
+        assert self._magenta_threshold(pixel), (
+            f"Expected magenta-tinted pixel, got r={pixel.red()} "
+            f"g={pixel.green()} b={pixel.blue()} a={pixel.alpha()}"
+        )
+        overlay.close()
+
+    def test_zones_hidden_when_toggle_off(self, qapp):
+        from PySide6.QtGui import QImage
+
+        overlay = self._make_overlay(qapp)
+        overlay.set_phone_zones([(0.1, 0.2, 0.3, 0.4)])
+        overlay.set_phone_zones_visible(False)
+        qapp.processEvents()
+
+        img = QImage(overlay.size(), QImage.Format_ARGB32)
+        img.fill(0)
+        overlay.render(img)
+
+        pixel = img.pixelColor(480, 432)
+        assert not self._magenta_threshold(pixel)
+        overlay.close()
+
+    def test_click_on_zone_does_not_select_a_plate(self, qapp):
+        """A left-click inside a phone zone (no plate beneath) must not
+        select anything — zones are non-interactive.
+        """
+        from PySide6.QtCore import QEvent, QPointF, Qt
+        from PySide6.QtGui import QMouseEvent
+
+        overlay = self._make_overlay(qapp)
+        overlay.set_clip_data(ClipPlateData(clip_index=0))  # no plates
+        overlay.set_current_frame(0, force=True)
+        overlay.set_phone_zones([(0.1, 0.2, 0.3, 0.4)])
+        overlay.set_phone_zones_visible(True)
+        qapp.processEvents()
+
+        press = QMouseEvent(
+            QEvent.MouseButtonPress,
+            QPointF(480, 432),
+            Qt.LeftButton,
+            Qt.LeftButton,
+            Qt.NoModifier,
+        )
+        overlay.mousePressEvent(press)
+
+        assert overlay.selected_box() is None
+        assert overlay._selected_idx == -1
+        overlay.close()

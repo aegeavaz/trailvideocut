@@ -242,6 +242,9 @@ class PlateDetectionWorker(QThread):
                     tiled=self._tiled,
                     min_track_length=self._min_track_length,
                 )
+                # `data` is a ClipPlateData; it carries `phone_zones` populated
+                # by the detector when `exclude_phones=True`. No separate
+                # signal is needed — zones ride along on the same object.
                 results[clip_index] = data
 
             self.finished.emit(results)
