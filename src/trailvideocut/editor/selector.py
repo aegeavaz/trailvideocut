@@ -1,4 +1,5 @@
 import bisect
+import logging
 import statistics
 
 from trailvideocut.audio.energy_curve import EnergyTransition
@@ -6,6 +7,8 @@ from trailvideocut.audio.models import AudioAnalysis, BeatInfo, MusicSection
 from trailvideocut.config import TrailVideoCutConfig
 from trailvideocut.editor.models import CutPlan, EditDecision
 from trailvideocut.video.models import VideoSegment
+
+logger = logging.getLogger(__name__)
 
 
 class SegmentSelector:
@@ -32,6 +35,18 @@ class SegmentSelector:
             raise ValueError("Need at least 2 beats to create a cut plan")
         if not segments:
             raise ValueError("No video segments available")
+
+        # Apply exclusion filter *before* include-reservation, coverage zones,
+        # and greedy fill. Empty-after-filter is an error, not a warning.
+        if self.config.excluded_ranges:
+            original_count = len(segments)
+            segments = self._filter_excluded(segments)
+            if not segments:
+                raise RuntimeError(
+                    f"All {original_count} candidate segments were removed by "
+                    f"{len(self.config.excluded_ranges)} exclusion range(s); "
+                    "nothing left to pick from. Edit your exclusions and try again."
+                )
 
         # Build beat intervals
         intervals = [
@@ -80,6 +95,26 @@ class SegmentSelector:
             sorted_segments, midpoints, audio.sections,
             target_clips, video_duration, include_segments
         )
+
+        # Undercount path: if exclusions (or just short source) left us with
+        # fewer candidates than requested, warn with the shortfall numbers and
+        # total excluded duration — and clamp the intervals so we don't
+        # IndexError downstream.
+        if len(selected) < len(merged_intervals):
+            excluded_duration = sum(
+                max(0.0, e - s) for s, e in self.config.excluded_ranges
+            )
+            cause = (
+                f" (excluded {excluded_duration:.1f}s across "
+                f"{len(self.config.excluded_ranges)} range(s))"
+                if self.config.excluded_ranges
+                else ""
+            )
+            logger.warning(
+                "SegmentSelector produced %d clips but %d were requested%s",
+                len(selected), len(merged_intervals), cause,
+            )
+            merged_intervals = merged_intervals[: len(selected)]
 
         # Build edit decisions from selected segments mapped to intervals
         decisions: list[EditDecision] = []
@@ -213,6 +248,24 @@ class SegmentSelector:
         # Sort chronologically and trim
         selected.sort(key=lambda s: s.midpoint)
         return selected[:n]
+
+    def _filter_excluded(
+        self, segments: list[VideoSegment]
+    ) -> list[VideoSegment]:
+        """Drop segments whose midpoint is strictly inside any exclusion range.
+
+        Boundary-equal midpoints are retained (strict `start < m < end` test).
+        """
+        ranges = self.config.excluded_ranges
+        if not ranges:
+            return segments
+        kept: list[VideoSegment] = []
+        for seg in segments:
+            m = seg.midpoint
+            if any(s < m < e for s, e in ranges):
+                continue
+            kept.append(seg)
+        return kept
 
     def _within_cluster_limit(
         self,

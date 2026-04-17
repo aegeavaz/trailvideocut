@@ -22,7 +22,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from trailvideocut.ui.exclusions_tab import ExclusionsTab
 from trailvideocut.ui.video_player import VideoPlayer
+from trailvideocut.video.exclusions import (
+    ExclusionRange,
+    load_exclusions,
+    save_exclusions,
+)
 
 _VIDEO_FILTER = "Video Files (*.mp4 *.avi *.mkv *.mov *.webm);;All Files (*)"
 _AUDIO_FILTER = "Audio Files (*.wav *.mp3 *.flac *.ogg *.m4a);;All Files (*)"
@@ -42,6 +48,7 @@ class SetupPage(QWidget):
         super().__init__(parent)
         self._marks: list[float] = []
         self._selected_mark_index: int = -1
+        self._excluded_ranges: list[tuple[float, float]] = []
         self._build_ui()
 
     def _build_ui(self):
@@ -121,6 +128,11 @@ class SetupPage(QWidget):
         self._marks_scroll.setWidget(self._marks_container)
         marks_layout.addWidget(self._marks_scroll)
         tabs.addTab(marks_tab, "Marks")
+
+        # Excluded tab — skip time ranges during clip selection
+        self._exclusions_tab = ExclusionsTab()
+        self._exclusions_tab.ranges_changed.connect(self._on_exclusions_changed)
+        tabs.addTab(self._exclusions_tab, "Excluded")
 
         # Settings tab — compact 2-column form
         settings_tab = QWidget()
@@ -222,6 +234,12 @@ class SetupPage(QWidget):
         QShortcut(Qt.Key_End, self, self._player._go_end, context=ctx)
         QShortcut(Qt.Key_A, self, self._add_mark, context=ctx)
         QShortcut(Qt.Key_D, self, self._remove_mark, context=ctx)
+        QShortcut(Qt.Key_I, self, self._exclusions_tab.capture_start, context=ctx)
+        QShortcut(Qt.Key_O, self, self._exclusions_tab.capture_end, context=ctx)
+        QShortcut(Qt.Key_Escape, self, self._exclusions_tab.cancel_pending, context=ctx)
+
+        # Keep the Excluded tab in sync with the video player's current time
+        self._player.position_changed.connect(self._exclusions_tab.set_player_position)
 
     # --- Key-hold stepping ---
 
@@ -245,6 +263,7 @@ class SetupPage(QWidget):
         if path:
             self._video_path.setText(path)
             self._player.load_video(path)
+            self._auto_load_exclusions(Path(path))
 
     def _browse_audio(self):
         path, _ = QFileDialog.getOpenFileName(self, "Select Audio", "", _AUDIO_FILTER)
@@ -315,6 +334,26 @@ class SetupPage(QWidget):
         self._marks_chip_layout.addStretch()
         self._player.set_marks(self._marks)
 
+    # --- Exclusions ---
+
+    def _on_exclusions_changed(self, ranges: list[tuple[float, float]]):
+        self._excluded_ranges = list(ranges)
+        video_text = self._video_path.text().strip()
+        if video_text:
+            exclusion_objs = [ExclusionRange(s, e) for s, e in ranges]
+            save_exclusions(Path(video_text), exclusion_objs)
+        # Scrubber overlay: let the video player draw the shaded spans.
+        if hasattr(self._player, "set_excluded_ranges"):
+            self._player.set_excluded_ranges(list(ranges))
+
+    def _auto_load_exclusions(self, video_path: Path):
+        loaded = load_exclusions(video_path)
+        ranges = [(r.start, r.end) for r in loaded]
+        self._excluded_ranges = ranges
+        self._exclusions_tab.set_ranges(ranges)
+        if hasattr(self._player, "set_excluded_ranges"):
+            self._player.set_excluded_ranges(list(ranges))
+
     # --- Save / Load marks ---
 
     def _save_marks(self):
@@ -372,6 +411,7 @@ class SetupPage(QWidget):
             "use_gpu": self._gpu_check.isChecked(),
             "gpu_batch_size": self._gpu_batch.value(),
             "include_timestamps": list(self._marks),
+            "excluded_ranges": list(self._excluded_ranges),
         })
 
     def _update_analyze_enabled(self):

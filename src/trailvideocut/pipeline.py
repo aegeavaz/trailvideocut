@@ -17,6 +17,7 @@ from trailvideocut.editor.cut_points import energy_to_density, select_cut_points
 from trailvideocut.editor.selector import SegmentSelector
 from trailvideocut.gpu import detect_gpu
 from trailvideocut.video.analyzer import VideoAnalyzer
+from trailvideocut.video.exclusions import ExclusionRange, validate_exclusions
 from trailvideocut.video.models import VideoSegment
 
 console = Console()
@@ -245,3 +246,31 @@ class TrailVideoCutPipeline:
         for ts in self.config.include_timestamps:
             if ts < 0:
                 raise ValueError(f"Include timestamp must be non-negative: {ts}")
+
+        # Validate exclusion ranges — need video duration to bounds-check
+        if self.config.excluded_ranges:
+            duration = self._probe_video_duration()
+            ranges = [ExclusionRange(s, e) for s, e in self.config.excluded_ranges]
+            validate_exclusions(
+                ranges, duration, list(self.config.include_timestamps)
+            )
+
+    def _probe_video_duration(self) -> float:
+        """Probe the source video's duration using cv2 (lightweight, no analysis)."""
+        import cv2
+
+        cap = cv2.VideoCapture(str(self.config.video_path))
+        try:
+            if not cap.isOpened():
+                raise ValueError(
+                    f"Unable to open video for duration probe: {self.config.video_path}"
+                )
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+        finally:
+            cap.release()
+        if fps <= 0 or frames <= 0:
+            raise ValueError(
+                f"Unable to determine duration of {self.config.video_path}"
+            )
+        return frames / fps

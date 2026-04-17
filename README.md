@@ -13,6 +13,7 @@ Automatically cut motorcycle POV videos to sync with music beats.
 - **GPU acceleration** — NVIDIA NVENC encoding, hardware decoding, CuPy-accelerated frame scoring
 - **DaVinci Resolve export** — OTIO timeline export for manual refinement in DaVinci Resolve
 - **Must-include marks** — Pin specific timestamps so they always appear in the final edit
+- **Exclusion ranges** — Skip boring time spans (mount-up, stops, dead air) so the selector never picks from them
 - **CLI + GUI** — Full Typer CLI for scripting, PySide6 GUI for interactive workflow (Setup → Review → Export)
 
 ## Installation
@@ -55,6 +56,12 @@ trailvideocut cut ride.mp4 song.mp3 --davinci
 # Pin specific moments (in seconds)
 trailvideocut cut ride.mp4 song.mp3 -i 42.5 -i 78.0
 
+# Skip time ranges from clip selection (repeatable, START:END in seconds)
+# The selector never picks clips whose midpoint falls inside an excluded
+# range. Ranges are auto-saved as a `{video_stem}.exclusions.json` sidecar
+# when edited in the GUI; the CLI flag takes precedence for that invocation.
+trailvideocut cut ride.mp4 song.mp3 -x 0:30 -x 120:135
+
 # Customize transitions and segment lengths
 trailvideocut cut ride.mp4 song.mp3 -t crossfade --crossfade 0.3 --min-segment 1.5 --max-segment 6.0
 
@@ -71,7 +78,7 @@ trailvideocut ui
 
 ### GUI
 
-1. **Setup** — Load video and audio files, configure transition style and parameters
+1. **Setup** — Load video and audio files, configure transition style and parameters. Use the **Excluded** sub-tab to mark time ranges the clip selector should skip — Start/End buttons (keyboard `I`/`O`) capture the current player position; ranges auto-save to a sidecar and show as shaded red spans on the scrubber.
 2. **Review** — Preview detected beats, adjust must-include marks, tweak segment boundaries
 3. **Export** — Render the final video or export an OTIO timeline for DaVinci Resolve
 

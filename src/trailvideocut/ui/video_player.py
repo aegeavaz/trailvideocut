@@ -24,17 +24,37 @@ from PySide6.QtWidgets import (
 
 
 class ClickSlider(QSlider):
-    """QSlider that jumps to click position and paints mark indicators."""
+    """QSlider that jumps to click position and paints mark indicators.
+
+    Also renders semi-transparent red spans for exclusion ranges (painted
+    beneath the mark lines so marks stay visible on top).
+    """
 
     def __init__(self, orientation, parent=None):
         super().__init__(orientation, parent)
         self._marks: list[float] = []  # normalized 0-1 positions
+        self._excluded_spans: list[tuple[float, float]] = []  # normalized 0-1
 
     def set_marks(self, timestamps: list[float], duration: float):
         if duration > 0:
             self._marks = [t / duration for t in timestamps if 0 <= t <= duration]
         else:
             self._marks = []
+        self.update()
+
+    def set_excluded_spans(
+        self, ranges: list[tuple[float, float]], duration: float
+    ) -> None:
+        if duration > 0:
+            clipped: list[tuple[float, float]] = []
+            for s, e in ranges:
+                s_n = max(0.0, min(1.0, s / duration))
+                e_n = max(0.0, min(1.0, e / duration))
+                if e_n > s_n:
+                    clipped.append((s_n, e_n))
+            self._excluded_spans = clipped
+        else:
+            self._excluded_spans = []
         self.update()
 
     def mousePressEvent(self, event):
@@ -50,7 +70,7 @@ class ClickSlider(QSlider):
 
     def paintEvent(self, event):
         super().paintEvent(event)
-        if not self._marks:
+        if not self._marks and not self._excluded_spans:
             return
         opt = QStyleOptionSlider()
         self.initStyleOption(opt)
@@ -62,11 +82,24 @@ class ClickSlider(QSlider):
         offset = groove.left() + handle_len // 2
 
         painter = QPainter(self)
-        pen = QPen(QColor("#ff5252"), 2)
-        painter.setPen(pen)
-        for norm in self._marks:
-            x = offset + int(norm * available)
-            painter.drawLine(x, 0, x, self.height())
+        # Excluded spans first (drawn beneath the mark lines).
+        if self._excluded_spans:
+            span_color = QColor(220, 40, 40, 90)  # semi-transparent red
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(span_color)
+            for s_n, e_n in self._excluded_spans:
+                x1 = offset + int(s_n * available)
+                x2 = offset + int(e_n * available)
+                if x2 <= x1:
+                    continue
+                painter.drawRect(x1, 0, x2 - x1, self.height())
+
+        if self._marks:
+            pen = QPen(QColor("#ff5252"), 2)
+            painter.setPen(pen)
+            for norm in self._marks:
+                x = offset + int(norm * available)
+                painter.drawLine(x, 0, x, self.height())
         painter.end()
 
 
@@ -128,6 +161,9 @@ class VideoPlayer(QWidget):
         self._hold_step_timer: QTimer | None = None
         self._hold_step_delay_timer: QTimer | None = None
         self._hold_step_direction: int = 0
+
+        # Latest exclusion ranges, repainted on duration change
+        self._excluded_ranges: list[tuple[float, float]] = []
 
         self._player.positionChanged.connect(self._on_position_changed)
         self._player.durationChanged.connect(self._on_duration_changed)
@@ -209,6 +245,11 @@ class VideoPlayer(QWidget):
 
     def set_marks(self, timestamps: list[float]):
         self._slider.set_marks(timestamps, self.duration)
+
+    def set_excluded_ranges(self, ranges: list[tuple[float, float]]):
+        """Render exclusion ranges as shaded spans on the scrubber."""
+        self._excluded_ranges = list(ranges)
+        self._slider.set_excluded_spans(self._excluded_ranges, self.duration)
 
     def seek_to(self, seconds: float):
         self._seek(int(seconds * 1000))
@@ -450,6 +491,9 @@ class VideoPlayer(QWidget):
         self._slider.setRange(0, duration_ms)
         self._slider.setValue(0)
         self._update_time_label()
+        # Re-apply exclusion spans now that duration is known.
+        if self._excluded_ranges:
+            self._slider.set_excluded_spans(self._excluded_ranges, self.duration)
 
     def _on_position_changed(self, position_ms: int):
         if not self._external_control:

@@ -16,6 +16,34 @@ app = typer.Typer(
 console = Console()
 
 
+def _parse_exclusion(value: str) -> tuple[float, float]:
+    """Parse `START:END` into a non-negative `(start, end)` float tuple.
+
+    Raises ``typer.BadParameter`` with the raw value on any failure.
+    """
+    if value.count(":") != 1:
+        raise typer.BadParameter(
+            f"Exclusion must be formatted as 'START:END' (got {value!r})"
+        )
+    start_str, end_str = value.split(":")
+    try:
+        start = float(start_str)
+        end = float(end_str)
+    except ValueError:
+        raise typer.BadParameter(
+            f"Exclusion endpoints must be numeric (got {value!r})"
+        )
+    if start < 0 or end < 0:
+        raise typer.BadParameter(
+            f"Exclusion endpoints must be non-negative (got {value!r})"
+        )
+    if not (start < end):
+        raise typer.BadParameter(
+            f"Exclusion requires start < end (got {value!r})"
+        )
+    return (start, end)
+
+
 @app.command()
 def cut(
     video: Path = typer.Argument(..., help="Path to the input video file", exists=True),
@@ -28,6 +56,11 @@ def cut(
     ),
     include: Optional[list[float]] = typer.Option(
         None, "-i", "--include", help="Must-include video timestamps in seconds (repeatable)"
+    ),
+    exclude: Optional[list[str]] = typer.Option(
+        None, "-x", "--exclude",
+        help="START:END time range in seconds to exclude from clip selection; "
+             "repeatable. Example: -x 0:30 -x 120:135",
     ),
     analysis_fps: float = typer.Option(
         3.0, "--analysis-fps", help="FPS for video analysis sampling"
@@ -66,12 +99,18 @@ def cut(
     ),
 ):
     """Cut a motorcycle POV video to sync with a song's beats."""
+    excluded_ranges: list[tuple[float, float]] = sorted(
+        (_parse_exclusion(v) for v in (exclude or [])),
+        key=lambda r: r[0],
+    )
+
     config = TrailVideoCutConfig(
         video_path=video,
         audio_path=audio,
         output_path=output,
         transition_style=transition,
         include_timestamps=include or [],
+        excluded_ranges=excluded_ranges,
         analysis_fps=analysis_fps,
         segment_hop=segment_hop,
         crossfade_duration=crossfade_duration,
@@ -96,6 +135,9 @@ def cut(
         console.print(f"  Output: {output}")
     if include:
         console.print(f"  Must-include: {include}")
+    if excluded_ranges:
+        ranges_str = ", ".join(f"{s:g}:{e:g}" for s, e in excluded_ranges)
+        console.print(f"  Excluded: {ranges_str}")
 
     # GPU status
     if gpu:

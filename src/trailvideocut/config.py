@@ -32,6 +32,7 @@ class TrailVideoCutConfig:
     min_segment_duration: float = 1.5
     max_segment_duration: float = 8.0
     include_timestamps: list[float] = field(default_factory=list)
+    excluded_ranges: list[tuple[float, float]] = field(default_factory=list)
 
     # Energy transition detection
     energy_transition_threshold: float = 0.3  # min energy change (0-1) to force a cut
