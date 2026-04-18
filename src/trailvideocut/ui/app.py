@@ -2,6 +2,13 @@ import ctypes
 import os
 import sys
 
+# Pin Qt's multimedia backend to FFmpeg. Frame-accurate stepping assumes the
+# decoder honours paused setPosition() calls; the Windows Media Foundation
+# backend does not. Setting this defensively so Qt doesn't silently fall back
+# to another backend if the FFmpeg plugin is ever missing on a future build.
+# Must be set before any Qt multimedia import.
+os.environ.setdefault("QT_MEDIA_BACKEND", "ffmpeg")
+
 # Qt's FFmpeg backend may fail to auto-detect HW decoders; set priority list explicitly.
 # Qt tries each in order, silently skips unavailable ones.
 # d3d11va/d3d12va = Windows, cuda = NVIDIA Linux, vaapi = AMD/Intel Linux

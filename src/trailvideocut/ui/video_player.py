@@ -582,16 +582,29 @@ class VideoPlayer(QWidget):
             self._on_transport("step_forward")
             return
         current_frame = self.frame_at(self.current_time)
-        target_ms = self.frame_to_ms(current_frame + 1)
-        self._user_seek(min(target_ms, self._duration_ms))
+        self._user_seek(min(self._frame_center_ms(current_frame + 1), self._duration_ms))
 
     def _step_back(self):
         if self._on_transport:
             self._on_transport("step_back")
             return
         current_frame = self.frame_at(self.current_time)
-        target_ms = self.frame_to_ms(current_frame - 1)
-        self._user_seek(max(target_ms, 0))
+        self._user_seek(max(self._frame_center_ms(current_frame - 1), 0))
+
+    def _frame_center_ms(self, frame: int) -> int:
+        """Return a position (ms) that lies safely inside *frame*'s display window.
+
+        ``frame_to_ms(N)`` returns the leading edge of frame N under the ideal
+        ``t = N/fps`` model. Real container presentation timestamps usually
+        carry a small constant offset (observed ~8 ms for 23.976 fps sources),
+        so a boundary-placed position can fall inside the *previous* frame's
+        actual display window, causing the video surface to not advance.
+        Aiming for the *center* of frame N's ideal window gives ~half a frame
+        of margin on each side, absorbing any realistic offset.
+        """
+        if frame <= 0:
+            return 0
+        return int((frame + 0.5) * 1000.0 / self._fps)
 
     def start_step_hold(self, direction: int):
         """Drive continuous frame-stepping at ~30 fps once a key has been held.
