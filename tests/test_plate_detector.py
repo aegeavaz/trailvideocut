@@ -1,5 +1,6 @@
 """Tests for the plate detection module."""
 
+import inspect
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -509,3 +510,196 @@ class TestPlateDetectorCancellation:
             assert isinstance(result, ClipPlateData)
             # Should have stopped early (5 frames, not 20)
             assert call_count[0] == 5
+
+
+class TestPlateDetectorVerticalPositionFilter:
+    """Always-on postfilter: when any surviving plate has its center in the
+    top half of the frame (cy < 0.5), drop every plate whose center is in
+    the bottom half (cy >= 0.5). No configuration surface.
+    """
+
+    def _make_detector(self, exclude_phones=False):
+        with patch("trailvideocut.plate.detector._BACKEND", "cv2"), \
+             patch("cv2.dnn.readNetFromONNX"):
+            return PlateDetector("fake.onnx", exclude_phones=exclude_phones)
+
+    # --- Unit tests on _filter_vertical_position directly ---
+
+    def test_drops_lower_when_upper_present(self):
+        det = self._make_detector()
+        upper = PlateBox(x=0.1, y=0.25, w=0.1, h=0.1, confidence=0.9)  # cy=0.30
+        lower = PlateBox(x=0.1, y=0.65, w=0.1, h=0.1, confidence=0.9)  # cy=0.70
+        result = det._filter_vertical_position([upper, lower])
+        assert result == [upper]
+
+    def test_noop_when_only_lower_boxes(self):
+        det = self._make_detector()
+        boxes = [
+            PlateBox(x=0.1, y=0.55, w=0.1, h=0.1),  # cy=0.60
+            PlateBox(x=0.1, y=0.75, w=0.1, h=0.1),  # cy=0.80
+        ]
+        assert det._filter_vertical_position(boxes) == boxes
+
+    def test_noop_when_only_upper_boxes(self):
+        det = self._make_detector()
+        boxes = [
+            PlateBox(x=0.1, y=0.10, w=0.1, h=0.1),  # cy=0.15
+            PlateBox(x=0.1, y=0.35, w=0.1, h=0.1),  # cy=0.40
+        ]
+        assert det._filter_vertical_position(boxes) == boxes
+
+    def test_empty_list_returns_empty(self):
+        det = self._make_detector()
+        assert det._filter_vertical_position([]) == []
+
+    def test_box_on_split_line_counts_as_lower(self):
+        det = self._make_detector()
+        # cy=0.25 (upper), cy=0.5 exactly (lower per `cy >= 0.5` convention).
+        upper = PlateBox(x=0.1, y=0.20, w=0.1, h=0.1, confidence=0.9)  # cy=0.25
+        on_line = PlateBox(x=0.1, y=0.45, w=0.0, h=0.10, confidence=0.9)  # cy=0.50
+        result = det._filter_vertical_position([upper, on_line])
+        assert result == [upper]
+
+    def test_lone_box_on_split_line_retained(self):
+        """cy exactly at 0.5 with no upper companion: no upper box triggers
+        the drop, so the lone box survives (the filter is 'trigger + drop'
+        not 'always drop lower').
+        """
+        det = self._make_detector()
+        on_line = PlateBox(x=0.1, y=0.45, w=0.0, h=0.10, confidence=0.9)  # cy=0.50
+        result = det._filter_vertical_position([on_line])
+        assert result == [on_line]
+
+    # --- Integration through detect_frame ---
+
+    def test_detect_frame_applies_filter_after_phone_zones(self):
+        """Upper box is eliminated by _filter_phone_zones; the vertical
+        filter must therefore see ONLY the lower box and leave it alone
+        (no upper box => no drop)."""
+        det = self._make_detector(exclude_phones=True)
+
+        upper = PlateBox(x=0.40, y=0.20, w=0.10, h=0.05, confidence=0.9)  # cy=0.225
+        lower = PlateBox(x=0.40, y=0.70, w=0.10, h=0.05, confidence=0.9)  # cy=0.725
+
+        # Make _parse_output hand back these two boxes regardless of input.
+        det._parse_output = MagicMock(return_value=[upper, lower])
+        # _filter_geometry would reject these tiny normalized boxes on a 100x100
+        # frame (pixel sizes below MIN_PLATE_PX_W/H). Bypass it for this test.
+        det._filter_geometry = lambda boxes, w, h: list(boxes)
+        # update_phone_zones must NOT refetch the phone model — set zones
+        # covering the upper box's center (0.45, 0.225) so the phone filter
+        # removes it.
+        det.update_phone_zones = MagicMock(
+            side_effect=lambda frame: setattr(
+                det, "_phone_zones", [(0.0, 0.0, 1.0, 0.5)],
+            ),
+        )
+        det._infer_cv2 = MagicMock(return_value=np.zeros((1, 5, 0), dtype=np.float32))
+
+        frame = np.zeros((100, 100, 3), dtype=np.uint8)
+        # Force the cv2.dnn branch inside detect_frame so we exercise
+        # _infer_cv2 + _parse_output (both mocked) instead of the real
+        # ultralytics path.
+        with patch("trailvideocut.plate.detector._BACKEND", "cv2"):
+            result = det.detect_frame(frame)
+
+        # Upper was phone-zone-eliminated => vertical filter sees only lower,
+        # sees no upper, returns [lower] unchanged.
+        assert len(result) == 1
+        assert result[0] is lower
+
+    def test_detect_frame_drops_lower_when_upper_survives(self):
+        """Control for the test above: with no phone zones, the upper box
+        survives all filters and triggers dropping of the lower box."""
+        det = self._make_detector(exclude_phones=False)
+
+        upper = PlateBox(x=0.40, y=0.20, w=0.10, h=0.05, confidence=0.9)
+        lower = PlateBox(x=0.40, y=0.70, w=0.10, h=0.05, confidence=0.9)
+
+        det._parse_output = MagicMock(return_value=[upper, lower])
+        det._filter_geometry = lambda boxes, w, h: list(boxes)
+        det.update_phone_zones = MagicMock()
+        det._infer_cv2 = MagicMock(return_value=np.zeros((1, 5, 0), dtype=np.float32))
+
+        frame = np.zeros((100, 100, 3), dtype=np.uint8)
+        with patch("trailvideocut.plate.detector._BACKEND", "cv2"):
+            result = det.detect_frame(frame)
+        assert result == [upper]
+
+    # --- Integration through detect_clip ---
+
+    def test_detect_clip_prunes_mixed_frames_keeps_lower_only_frames(self):
+        """detect_clip delegates to detect_frame/detect_frame_tiled per frame.
+        Mixed frames should have their lower boxes pruned; lower-only frames
+        should retain their boxes. Stub the per-frame detector with a version
+        that invokes the real _filter_vertical_position so we are exercising
+        the same filter the detector uses.
+        """
+        det = self._make_detector(exclude_phones=False)
+
+        upper = PlateBox(x=0.40, y=0.20, w=0.05, h=0.02, confidence=0.9)  # cy=0.21
+        lower = PlateBox(x=0.40, y=0.70, w=0.05, h=0.02, confidence=0.9)  # cy=0.71
+
+        # Frame 0: mixed (upper + lower) -> lower dropped.
+        # Frame 1: lower only -> kept.
+        # Frame 2: upper only -> kept.
+        # Frame 3: empty -> no entry in detections.
+        # Frame 4: mixed -> lower dropped.
+        per_frame = [[upper, lower], [lower], [upper], [], [upper, lower]]
+        frame_idx = [0]
+
+        def fake_detect(frame):
+            idx = frame_idx[0]
+            frame_idx[0] += 1
+            boxes = list(per_frame[idx]) if idx < len(per_frame) else []
+            # Exercise the real filter — this is what detect_frame_tiled will
+            # call internally once the implementation lands.
+            return det._filter_vertical_position(boxes)
+
+        det.detect_frame_tiled = fake_detect
+
+        with patch("cv2.VideoCapture") as mock_cap_cls:
+            mock_cap = MagicMock()
+            mock_cap_cls.return_value = mock_cap
+            mock_cap.get.return_value = 10.0
+            mock_cap.read.return_value = (
+                True, np.zeros((100, 100, 3), dtype=np.uint8),
+            )
+            result = det.detect_clip(
+                "fake.mp4", 0.0, 0.5, clip_index=0, temporal_filter=False,
+            )
+
+        # Frame 0: lower dropped, only upper remains.
+        assert len(result.detections[0]) == 1
+        assert result.detections[0][0] is upper
+        # Frame 1: lower-only, kept.
+        assert result.detections[1] == [lower]
+        # Frame 2: upper-only, kept.
+        assert result.detections[2] == [upper]
+        # Frame 3: no detections at all -> omitted from the sparse map.
+        assert 3 not in result.detections
+        # Frame 4: lower dropped again.
+        assert result.detections[4] == [upper]
+
+    # --- Signature guard ---
+
+    def test_init_signature_unchanged(self):
+        """The filter is non-configurable: no new parameters on __init__."""
+        expected = {
+            "self",
+            "model_path",
+            "confidence_threshold",
+            "exclude_phones",
+            "phone_redetect_every",
+            "verbose",
+            "min_ratio",
+            "max_ratio",
+            "min_plate_px_w",
+            "min_plate_px_h",
+        }
+        actual = set(inspect.signature(PlateDetector.__init__).parameters.keys())
+        assert actual == expected, (
+            f"PlateDetector.__init__ parameters changed. "
+            f"Expected {expected}, got {actual}. "
+            "The vertical-position filter must remain non-configurable."
+        )

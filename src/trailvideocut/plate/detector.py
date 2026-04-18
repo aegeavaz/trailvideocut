@@ -52,6 +52,11 @@ elif _HAS_ORT:
 else:
     _BACKEND = "cv2"
 
+# Vertical-position postfilter: when any surviving detection has its center
+# in the top half (cy < _VERTICAL_SPLIT_THRESHOLD), drop everything in the
+# bottom half of the same frame. Always-on, not user-configurable.
+_VERTICAL_SPLIT_THRESHOLD = 0.5
+
 
 class PlateDetector:
     """Detects license plates in video frames using a YOLO ONNX model."""
@@ -171,7 +176,8 @@ class PlateDetector:
             boxes = self._parse_output(outputs, w, h, ratio, pad_w, pad_h)
 
         boxes = self._filter_geometry(boxes, w, h)
-        return self._filter_phone_zones(boxes)
+        boxes = self._filter_phone_zones(boxes)
+        return self._filter_vertical_position(boxes)
 
     def detect_frame_tiled(self, frame: np.ndarray) -> list[PlateBox]:
         """Tiled detection for small plates: 320x320 crops -> 640x640 upscale -> detect."""
@@ -229,9 +235,13 @@ class PlateDetector:
             all_boxes = self._nms(all_boxes, iou_threshold=0.5)
 
         all_boxes = self._filter_geometry(all_boxes, w, h)
-        return self._filter_phone_zones(all_boxes)
+        all_boxes = self._filter_phone_zones(all_boxes)
+        return self._filter_vertical_position(all_boxes)
 
     # --- Post-detection filters ---
+    # Applied per frame, in order: geometry -> phone-zones -> vertical-position.
+    # Earlier per-box filters run first; the vertical-position filter is
+    # frame-level and needs to see the set after phone-zone elimination.
 
     def _filter_geometry(
         self, boxes: list[PlateBox], frame_w: int, frame_h: int,
@@ -524,6 +534,21 @@ class PlateDetector:
             if not inside:
                 filtered.append(box)
         return filtered
+
+    def _filter_vertical_position(self, boxes: list[PlateBox]) -> list[PlateBox]:
+        """Drop lower-half detections when any upper-half detection survives.
+
+        A detection with center y (`box.y + box.h / 2`) below
+        `_VERTICAL_SPLIT_THRESHOLD` is "upper"; at-or-above is "lower". If at
+        least one upper detection is present, every lower detection is removed.
+        Otherwise the list passes through untouched.
+        """
+        if not boxes:
+            return boxes
+        upper = [b for b in boxes if (b.y + b.h / 2) < _VERTICAL_SPLIT_THRESHOLD]
+        if not upper:
+            return boxes
+        return upper
 
     # --- Ultralytics backend ---
 
