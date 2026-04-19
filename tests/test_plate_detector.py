@@ -7,7 +7,11 @@ import numpy as np
 import pytest
 
 from trailvideocut.plate.models import ClipPlateData, PlateBox
-from trailvideocut.plate.detector import PlateDetector, _iou
+from trailvideocut.plate.detector import (
+    PlateDetector,
+    _VERTICAL_SPLIT_THRESHOLD,
+    _iou,
+)
 
 
 class TestPlateBox:
@@ -703,3 +707,205 @@ class TestPlateDetectorVerticalPositionFilter:
             f"Expected {expected}, got {actual}. "
             "The vertical-position filter must remain non-configurable."
         )
+
+
+class TestDashboardFilterUpperPlateGate:
+    """Per-frame gate on `_filter_phone_zones`: the dashboard exclusion filter
+    only runs when the post-geometry candidate list has at least one box whose
+    center is in the upper half of the frame (cy < _VERTICAL_SPLIT_THRESHOLD).
+
+    Rationale: when no upper-half plate is present, there is no contextual
+    evidence that we are filming a real road scene with another vehicle, so the
+    dashboard heuristic risks dropping a legitimate lower-half plate.
+    """
+
+    def _make_detector(self, exclude_phones=True):
+        with patch("trailvideocut.plate.detector._BACKEND", "cv2"), \
+             patch("cv2.dnn.readNetFromONNX"):
+            return PlateDetector("fake.onnx", exclude_phones=exclude_phones)
+
+    def _wire_for_detect_frame(self, det, parsed_boxes, zones):
+        """Configure a detector so that `detect_frame` returns `parsed_boxes`
+        post-geometry, with `_phone_zones` set to `zones` (no zone refresh).
+        """
+        det._parse_output = MagicMock(return_value=parsed_boxes)
+        # Bypass geometry filter (the synthetic boxes are below MIN_PLATE_PX).
+        det._filter_geometry = lambda boxes, w, h: list(boxes)
+        # Pin _phone_zones to the test value; suppress the in-frame refresh.
+        det.update_phone_zones = MagicMock(
+            side_effect=lambda frame: setattr(det, "_phone_zones", list(zones)),
+        )
+        det._infer_cv2 = MagicMock(
+            return_value=np.zeros((1, 5, 0), dtype=np.float32),
+        )
+
+    # --- Unit tests on the predicate ---
+
+    def test_should_apply_phone_zone_filter_predicate_uses_split_threshold(self):
+        det = self._make_detector()
+        # Box whose center is just below the split threshold -> upper-half.
+        upper = PlateBox(
+            x=0.40, y=_VERTICAL_SPLIT_THRESHOLD - 1e-6 - 0.05,
+            w=0.10, h=0.10, confidence=0.9,
+        )
+        # Box whose center is exactly on the split line -> classified as lower
+        # (matches `_filter_vertical_position`'s `cy >= 0.5` convention).
+        on_line = PlateBox(
+            x=0.40, y=_VERTICAL_SPLIT_THRESHOLD - 0.05,
+            w=0.10, h=0.10, confidence=0.9,
+        )
+        # Strictly lower-half box.
+        lower = PlateBox(x=0.40, y=0.80, w=0.10, h=0.10, confidence=0.9)
+
+        assert det._should_apply_phone_zone_filter([upper]) is True
+        assert det._should_apply_phone_zone_filter([upper, lower]) is True
+        assert det._should_apply_phone_zone_filter([on_line]) is False
+        assert det._should_apply_phone_zone_filter([lower]) is False
+        assert det._should_apply_phone_zone_filter([on_line, lower]) is False
+        assert det._should_apply_phone_zone_filter([]) is False
+
+    # --- Integration through detect_frame ---
+
+    def test_lower_only_frame_keeps_box_inside_dashboard_zone(self):
+        """No upper-half candidate => filter is skipped => the lower box that
+        sits inside the dashboard zone is retained.
+        """
+        det = self._make_detector(exclude_phones=True)
+        # Lower-half box centered at (0.5, 0.9), inside a bottom-strip zone.
+        lower = PlateBox(x=0.45, y=0.85, w=0.10, h=0.10, confidence=0.9)
+        zones = [(0.0, 0.5, 1.0, 0.5)]  # entire bottom half is "dashboard"
+        self._wire_for_detect_frame(det, [lower], zones)
+
+        with patch("trailvideocut.plate.detector._BACKEND", "cv2"):
+            result = det.detect_frame(np.zeros((100, 100, 3), dtype=np.uint8))
+
+        assert result == [lower]
+
+    def test_mixed_upper_lower_drops_dashboard_box(self):
+        """Upper-half candidate is present => filter runs => the lower box
+        inside the dashboard zone is removed before the vertical-position
+        filter sees it. The vertical-position filter then acts on the
+        remaining upper box and is a no-op.
+        """
+        det = self._make_detector(exclude_phones=True)
+        upper = PlateBox(x=0.40, y=0.20, w=0.10, h=0.05, confidence=0.9)  # cy=0.225
+        lower_in_zone = PlateBox(
+            x=0.45, y=0.85, w=0.10, h=0.10, confidence=0.9,  # cy=0.90
+        )
+        zones = [(0.0, 0.5, 1.0, 0.5)]
+        self._wire_for_detect_frame(det, [upper, lower_in_zone], zones)
+
+        with patch("trailvideocut.plate.detector._BACKEND", "cv2"):
+            result = det.detect_frame(np.zeros((100, 100, 3), dtype=np.uint8))
+
+        assert result == [upper]
+
+    def test_upper_only_frame_is_noop(self):
+        """Upper-only candidate list: filter runs but removes nothing
+        (dashboard zones live in the bottom half, so no upper-half center
+        falls inside them). Result equals the input.
+        """
+        det = self._make_detector(exclude_phones=True)
+        upper = PlateBox(x=0.40, y=0.10, w=0.10, h=0.05, confidence=0.9)  # cy=0.125
+        zones = [(0.0, 0.5, 1.0, 0.5)]
+        self._wire_for_detect_frame(det, [upper], zones)
+
+        with patch("trailvideocut.plate.detector._BACKEND", "cv2"):
+            result = det.detect_frame(np.zeros((100, 100, 3), dtype=np.uint8))
+
+        assert result == [upper]
+
+    def test_empty_post_geometry_is_noop(self):
+        """Empty candidate list => filter is skipped => empty result."""
+        det = self._make_detector(exclude_phones=True)
+        zones = [(0.0, 0.5, 1.0, 0.5)]
+        self._wire_for_detect_frame(det, [], zones)
+
+        with patch("trailvideocut.plate.detector._BACKEND", "cv2"):
+            result = det.detect_frame(np.zeros((100, 100, 3), dtype=np.uint8))
+
+        assert result == []
+
+    # --- Integration through detect_frame_tiled ---
+
+    def test_tiled_path_applies_same_gate(self):
+        """detect_frame_tiled must apply the same per-frame gate. With a
+        single lower-half candidate inside a dashboard zone, the filter is
+        skipped and the box survives.
+        """
+        det = self._make_detector(exclude_phones=True)
+        lower = PlateBox(x=0.45, y=0.85, w=0.10, h=0.10, confidence=0.9)
+        zones = [(0.0, 0.5, 1.0, 0.5)]
+
+        # Bypass tile-level model invocation by monkey-patching the post-tiling
+        # path directly: have NMS / geometry pass through unchanged, and have
+        # the model mock emit the single lower box.
+        det._parse_output = MagicMock(return_value=[lower])
+        det._filter_geometry = lambda boxes, w, h: list(boxes)
+        det.update_phone_zones = MagicMock(
+            side_effect=lambda frame: setattr(det, "_phone_zones", list(zones)),
+        )
+        det._infer_cv2 = MagicMock(
+            return_value=np.zeros((1, 5, 0), dtype=np.float32),
+        )
+
+        with patch("trailvideocut.plate.detector._BACKEND", "cv2"):
+            # 640x640 frame so detect_frame_tiled produces tiles.
+            frame = np.zeros((640, 640, 3), dtype=np.uint8)
+            result = det.detect_frame_tiled(frame)
+
+        # Filter was skipped (no upper-half candidate after dedup), so the
+        # lower box survives. NMS may or may not collapse duplicates from
+        # multiple tiles; either way the result must contain the lower box
+        # and nothing else.
+        assert len(result) >= 1
+        assert all(b.y == lower.y and b.x == lower.x for b in result)
+
+    # --- Recording invariance: zones are still recorded when filter is skipped ---
+
+    def test_zone_recording_unchanged_when_filter_skipped(self):
+        """detect_clip must still record per-frame phone zones in
+        ClipPlateData.phone_zones EVEN WHEN the new gate skipped the filter
+        for that frame. This verifies the gate touches filtering only, not
+        recording.
+        """
+        det = self._make_detector(exclude_phones=True)
+        lower = PlateBox(x=0.45, y=0.85, w=0.10, h=0.10, confidence=0.9)
+        zone_tuple = (0.0, 0.5, 1.0, 0.5)
+        frame_idx = [0]
+
+        def fake_detect(frame):
+            # Simulate update_phone_zones populating the zone for this frame.
+            det._phone_zones = [zone_tuple]
+            frame_idx[0] += 1
+            # Returning the lower box represents "filter was gated off because
+            # there is no upper-half candidate in this frame".
+            return [lower]
+
+        det.detect_frame_tiled = fake_detect
+
+        with patch("cv2.VideoCapture") as mock_cap_cls:
+            mock_cap = MagicMock()
+            mock_cap_cls.return_value = mock_cap
+            mock_cap.get.return_value = 10.0
+            mock_cap.read.return_value = (
+                True, np.zeros((100, 100, 3), dtype=np.uint8),
+            )
+            result = det.detect_clip(
+                "fake.mp4", 0.0, 0.5, clip_index=0, temporal_filter=False,
+            )
+
+        # Five frames were processed (5 fps * 0.5s implied range, see existing
+        # _run_clip helper). For each one, the lower box was kept (filter
+        # skipped) AND the zone was recorded.
+        assert frame_idx[0] >= 1
+        assert all(boxes == [lower] for boxes in result.detections.values()), (
+            "Lower-half box should be retained on every frame because the "
+            "filter is gated off when no upper-half candidate is present."
+        )
+        assert all(
+            zones == [zone_tuple] for zones in result.phone_zones.values()
+        ), "Zones must still be recorded even when the filter was skipped."
+        # And the zone-frame set must match the detection-frame set
+        # (recording happens for every frame regardless of the gate).
+        assert set(result.phone_zones.keys()) == set(result.detections.keys())

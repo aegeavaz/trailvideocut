@@ -20,6 +20,7 @@ from trailvideocut.editor.resolve_script import (
     _BLUR_SIZE_MAX,
     _BLUR_SIZE_MIN,
     _NEAREST_WINDOW,
+    _SCRIPT_TEMPLATE,
     _compute_blur_sizes,
     _generate_lua_script_for_clip as _real_generate_lua_script_for_clip,
     _group_into_tracks,
@@ -525,11 +526,11 @@ class TestEmptyDetections:
 
 class TestRelativeBlurSize:
     """XBlurSize is auto-scaled by relative plate area within the clip:
-    smallest plate -> _BLUR_SIZE_MIN, largest -> _BLUR_SIZE_MAX.
+    smallest plate -> _BLUR_SIZE_MIN (1.5), largest -> _BLUR_SIZE_MAX (2.5).
     """
 
     def test_single_plate_constant_size_gets_blur_min(self):
-        """One plate with the same size on every frame -> all XBlurSize = 1.0."""
+        """One plate with the same size on every frame -> all XBlurSize = _BLUR_SIZE_MIN."""
         detections = _make_detections({
             0: {"x": 0.4, "y": 0.45, "w": 0.2, "h": 0.05},
             1: {"x": 0.4, "y": 0.45, "w": 0.2, "h": 0.05},
@@ -543,7 +544,7 @@ class TestRelativeBlurSize:
             assert _parse_scalar_rhs(line) == _BLUR_SIZE_MIN
 
     def test_two_tracks_different_areas_get_min_max(self):
-        """Small plate -> 1.0, large plate -> 2.0."""
+        """Small plate -> _BLUR_SIZE_MIN, large plate -> _BLUR_SIZE_MAX."""
         # Two spatially separated plates at the same frame with different sizes.
         # _group_into_tracks splits them because centers are far apart.
         detections = {
@@ -592,10 +593,11 @@ class TestRelativeBlurSize:
         assert vals[0] == _BLUR_SIZE_MIN
         assert vals[2] == _BLUR_SIZE_MAX
         # Midpoint: (0.0032 - 0.0016) / (0.0048 - 0.0016) = 0.5
-        assert abs(vals[1] - 1.5) < 1e-9
+        # In the [_BLUR_SIZE_MIN, _BLUR_SIZE_MAX] = [1.5, 2.5] range, midpoint = 2.0.
+        assert abs(vals[1] - 2.0) < 1e-9
 
     def test_plate_changing_size_across_frames(self):
-        """One track whose plate grows: min frame -> 1.0, max frame -> 2.0."""
+        """One track whose plate grows: min frame -> _BLUR_SIZE_MIN, max frame -> _BLUR_SIZE_MAX."""
         detections = _make_detections({
             0: {"x": 0.4, "y": 0.4, "w": 0.05, "h": 0.05},  # area = 0.0025
             1: {"x": 0.4, "y": 0.4, "w": 0.10, "h": 0.10},  # area = 0.01
@@ -612,7 +614,7 @@ class TestRelativeBlurSize:
         assert vals_by_frame[1] == _BLUR_SIZE_MAX
 
     def test_all_identical_areas_get_blur_min(self):
-        """Degenerate case: all plates same area -> no division by zero, all 1.0."""
+        """Degenerate case: all plates same area -> no division by zero, all _BLUR_SIZE_MIN."""
         detections = {
             "0": [
                 {"x": 0.1, "y": 0.1, "w": 0.05, "h": 0.05},
@@ -631,3 +633,37 @@ class TestRelativeBlurSize:
         """Empty tracks produce empty result."""
         assert _compute_blur_sizes([], frame_count=10) == {}
         assert _compute_blur_sizes([{}], frame_count=5) == {}
+
+
+class TestInResolveScriptBlurSizeRange:
+    """The in-Resolve embedded Python script body (_SCRIPT_TEMPLATE) re-implements
+    the XBlurSize auto-scaling inline, with hard-coded literals — it cannot import
+    module constants because it runs inside the Resolve process.
+
+    These tests guard against the offline Lua-script generator (driven by
+    _BLUR_SIZE_MIN / _BLUR_SIZE_MAX) and the embedded Python body drifting apart.
+    Both paths must agree on the [_BLUR_SIZE_MIN, _BLUR_SIZE_MAX] = [1.5, 2.5] range.
+    """
+
+    def test_per_frame_interpolation_uses_blur_min_floor(self):
+        """The per-frame loop computes blur_size as `_BLUR_SIZE_MIN + (...) / area_span`."""
+        assert "1.5 + (box_area - min_area) / area_span" in _SCRIPT_TEMPLATE
+        # Sanity: the previous floor (1.0) MUST NOT remain in that expression.
+        assert "1.0 + (box_area - min_area) / area_span" not in _SCRIPT_TEMPLATE
+
+    def test_all_equal_areas_fallback_uses_blur_min(self):
+        """The degenerate-area fallback assigns `blur_size = _BLUR_SIZE_MIN`."""
+        assert "blur_size = 1.5" in _SCRIPT_TEMPLATE
+        assert "blur_size = 1.0" not in _SCRIPT_TEMPLATE
+
+    def test_embedded_body_agrees_with_module_constants(self):
+        """Hard-coded floor literal in the embedded body matches the module constant.
+
+        Catches a future drift where someone changes `_BLUR_SIZE_MIN` but forgets the
+        embedded Python body (or vice versa).
+        """
+        floor_literal = f"{_BLUR_SIZE_MIN}"
+        assert f"blur_size = {floor_literal}" in _SCRIPT_TEMPLATE
+        assert (
+            f"{floor_literal} + (box_area - min_area) / area_span" in _SCRIPT_TEMPLATE
+        )

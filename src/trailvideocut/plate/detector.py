@@ -176,7 +176,8 @@ class PlateDetector:
             boxes = self._parse_output(outputs, w, h, ratio, pad_w, pad_h)
 
         boxes = self._filter_geometry(boxes, w, h)
-        boxes = self._filter_phone_zones(boxes)
+        if self._should_apply_phone_zone_filter(boxes):
+            boxes = self._filter_phone_zones(boxes)
         return self._filter_vertical_position(boxes)
 
     def detect_frame_tiled(self, frame: np.ndarray) -> list[PlateBox]:
@@ -235,13 +236,19 @@ class PlateDetector:
             all_boxes = self._nms(all_boxes, iou_threshold=0.5)
 
         all_boxes = self._filter_geometry(all_boxes, w, h)
-        all_boxes = self._filter_phone_zones(all_boxes)
+        if self._should_apply_phone_zone_filter(all_boxes):
+            all_boxes = self._filter_phone_zones(all_boxes)
         return self._filter_vertical_position(all_boxes)
 
     # --- Post-detection filters ---
-    # Applied per frame, in order: geometry -> phone-zones -> vertical-position.
-    # Earlier per-box filters run first; the vertical-position filter is
-    # frame-level and needs to see the set after phone-zone elimination.
+    # Applied per frame, in order:
+    #     geometry -> phone-zones (gated on upper-half presence) -> vertical-position.
+    # The phone-zone filter only runs when the post-geometry candidate list
+    # contains at least one box whose center is in the upper half of the
+    # frame (see `_should_apply_phone_zone_filter`); otherwise it is skipped
+    # so that legitimate lower-only plates are not mistakenly removed.
+    # The vertical-position filter is always-on and operates on the set
+    # remaining after the (possibly gated) phone-zone elimination.
 
     def _filter_geometry(
         self, boxes: list[PlateBox], frame_w: int, frame_h: int,
@@ -534,6 +541,20 @@ class PlateDetector:
             if not inside:
                 filtered.append(box)
         return filtered
+
+    def _should_apply_phone_zone_filter(self, boxes: list[PlateBox]) -> bool:
+        """Apply the dashboard exclusion filter only when the same frame has
+        at least one upper-half candidate (cy < _VERTICAL_SPLIT_THRESHOLD).
+
+        Reuses the same threshold as `_filter_vertical_position` by design:
+        when no upper-half plate is present, there is no contextual evidence
+        we are filming a real road scene, so dropping a lower-half plate just
+        because it overlaps the dashboard zone risks discarding a legitimate
+        detection.
+        """
+        return any(
+            (b.y + b.h / 2) < _VERTICAL_SPLIT_THRESHOLD for b in boxes
+        )
 
     def _filter_vertical_position(self, boxes: list[PlateBox]) -> list[PlateBox]:
         """Drop lower-half detections when any upper-half detection survives.

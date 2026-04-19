@@ -27,8 +27,12 @@ _NEAREST_WINDOW = 2
 
 # XBlurSize range for relative plate area scaling.
 # Smallest plate in a clip -> _BLUR_SIZE_MIN, largest -> _BLUR_SIZE_MAX.
-_BLUR_SIZE_MIN = 1.0
-_BLUR_SIZE_MAX = 2.0
+# The floor was raised from 1.0 to 1.5 because at 1.0 the smallest plates
+# remained legible after the Fusion blur was applied; the dynamic range (1.0)
+# is unchanged. The in-Resolve embedded Python body in `_SCRIPT_TEMPLATE` must
+# be kept in sync (a dedicated test enforces this).
+_BLUR_SIZE_MIN = 1.5
+_BLUR_SIZE_MAX = 2.5
 
 
 def _nearest_box_for_frame(
@@ -673,8 +677,9 @@ def apply_blur_to_clip(comp, tracks, frame_width, frame_height):
 
     Keyframes are densified: one keyframe per comp frame within +/- 2 frames
     of any detection in the track, eliminating Bezier interpolation drift.
-    XBlurSize is auto-scaled by relative plate area: smallest plate -> 1.0,
-    largest -> 2.0.
+    XBlurSize is auto-scaled by relative plate area: smallest plate -> 1.5,
+    largest -> 2.5.  Must stay in sync with `_BLUR_SIZE_MIN` / `_BLUR_SIZE_MAX`
+    in the host module.
     """
     if not tracks:
         return 0
@@ -740,12 +745,12 @@ def apply_blur_to_clip(comp, tracks, frame_width, frame_height):
             width = box["w"]
             height = box["h"]
 
-            # Auto-scaled blur size: smallest plate area -> 1.0, largest -> 2.0
+            # Auto-scaled blur size: smallest plate area -> 1.5, largest -> 2.5
             box_area = box["w"] * box["h"]
             if area_span > 0:
-                blur_size = 1.0 + (box_area - min_area) / area_span
+                blur_size = 1.5 + (box_area - min_area) / area_span
             else:
-                blur_size = 1.0
+                blur_size = 1.5
 
             mask.SetInput("Center", {{1: center_x, 2: center_y}}, frame_num)
             mask.SetInput("Width", width, frame_num)

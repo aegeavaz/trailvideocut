@@ -1,5 +1,7 @@
-## ADDED Requirements
+## Purpose
 
+The DaVinci plate-export capability extends the OTIO export pipeline so a Resolve project can apply per-plate Fusion blur to detected license plates. It embeds plate detections as OTIO clip metadata, generates a companion Python script that drives DaVinci Resolve's `DaVinciResolveScript` API to build Fusion blur compositions with keyframed rectangular masks, and — when running on WSL — auto-launches that script through a Windows-native Python interpreter so the user does not have to copy files between worlds. Frame alignment is preserved end-to-end so each Fusion keyframe lands on the same source frame as the on-screen preview overlay and the MP4 export.
+## Requirements
 ### Requirement: Embed plate data as OTIO clip metadata
 When exporting to DaVinci Resolve with plate blur enabled, the system SHALL embed plate detection data in each OTIO clip's `metadata` dictionary under the key `trailvideocut.plates`. The metadata SHALL contain per-frame bounding boxes with coordinates mapped to source-video frame numbers relative to the clip's source range. Each plate entry SHALL include normalized coordinates (x, y, w, h).
 
@@ -68,19 +70,23 @@ The generated Fusion composition for each clip SHALL follow this node structure:
 - **THEN** the Lua script SHALL NOT insert a post-boundary keyframe (since there are no following frames to suppress), and the last detection keyframe SHALL be set normally
 
 ### Requirement: Blur size auto-scaling by relative plate area
-The Fusion Blur node's XBlurSize SHALL be auto-scaled based on the plate's bounding-box area (`w × h`) relative to all plates in the clip. The smallest plate area maps to XBlurSize=1.0, the largest to XBlurSize=2.0, with linear interpolation for intermediate sizes. All detected plates are included in the composition.
+The Fusion Blur node's XBlurSize SHALL be auto-scaled based on the plate's bounding-box area (`w × h`) relative to all plates in the clip. The smallest plate area maps to XBlurSize=1.5, the largest to XBlurSize=2.5, with linear interpolation for intermediate sizes. All detected plates are included in the composition. Both code paths that emit XBlurSize keyframes — the offline Lua-script generator and the in-Resolve Python automation script — SHALL use this same range.
 
 #### Scenario: Smallest plate in clip
 - **WHEN** a plate has the smallest bounding-box area in the clip
-- **THEN** the Fusion Blur node SHALL have XBlurSize=1.0
+- **THEN** the Fusion Blur node SHALL have XBlurSize=1.5
 
 #### Scenario: Largest plate in clip
 - **WHEN** a plate has the largest bounding-box area in the clip
-- **THEN** the Fusion Blur node SHALL have XBlurSize=2.0
+- **THEN** the Fusion Blur node SHALL have XBlurSize=2.5
 
 #### Scenario: All plates same size
 - **WHEN** all plates in the clip have the same bounding-box area
-- **THEN** all Fusion Blur nodes SHALL have XBlurSize=1.0
+- **THEN** all Fusion Blur nodes SHALL have XBlurSize=1.5
+
+#### Scenario: Intermediate plate area
+- **WHEN** a plate's bounding-box area lies exactly midway between the clip's smallest and largest plate areas
+- **THEN** the Fusion Blur node SHALL have XBlurSize=2.0 (the midpoint of the [1.5, 2.5] range)
 
 ### Requirement: Export page UI controls for DaVinci plate export
 The export page SHALL include a checkbox labeled "Include plate blur data" that is visible only when the DaVinci export mode is selected. The checkbox SHALL be enabled by default when plate data exists and `plate_blur_enabled` is True. The checkbox state SHALL control whether plate metadata is embedded in the OTIO and whether the companion script is generated.
@@ -148,3 +154,4 @@ The generated DaVinci Lua script SHALL map each plate detection at clip-relative
 #### Scenario: No spurious offset regardless of source-video origin
 - **WHEN** a clip has plate detections at source frames K1 < K2 < K3 and the source video was either natively captured or concatenated from multiple source files
 - **THEN** the Lua keyframes SHALL land at `clip_offset + K1`, `clip_offset + K2`, `clip_offset + K3` with no additional conditional offset, matching the MP4 export's pixel-level alignment at the same source frames
+
