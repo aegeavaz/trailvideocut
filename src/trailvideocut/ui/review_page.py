@@ -979,6 +979,7 @@ class ReviewPage(QWidget):
             self, "Model Download Failed",
             f"Could not download the plate detection model:\n\n{message}",
         )
+        self._restore_overlay_for_current_clip()
 
     def _start_plate_detection(self, model_path: str):
         """Launch plate detection worker with the given model."""
@@ -1114,6 +1115,7 @@ class ReviewPage(QWidget):
             self, "Plate Detection Error",
             f"An error occurred during plate detection:\n\n{message}",
         )
+        self._restore_overlay_for_current_clip()
 
     def _on_toggle_plates_visible(self, visible: bool):
         show = visible and bool(self._plate_data)
@@ -1249,6 +1251,21 @@ class ReviewPage(QWidget):
             self._plate_overlay.show()
             self._position_overlay()
             self._plate_overlay.raise_()
+
+    def _restore_overlay_for_current_clip(self):
+        """Re-establish overlay visibility and contents after a modal dialog.
+
+        Unlike `_restore_overlay` (which is the reactive handler for
+        `unexpectedly_hidden`), this is the proactive path invoked at the
+        call-site of confirmation dialogs so the overlay is deterministically
+        re-shown regardless of Yes/No and regardless of whether the WM hid it
+        while the modal was up.
+        """
+        if not self._plate_data:
+            return
+        self._plate_overlay.setVisible(self._chk_show_plates.isChecked())
+        self._sync_overlay_to_current_clip()
+        self._plate_overlay.raise_()
 
     def _schedule_plate_list_refresh(self):
         """Coalesce chip rebuilds so rapid scrubbing doesn't thrash the UI."""
@@ -1581,6 +1598,7 @@ class ReviewPage(QWidget):
                 self, "Frame Read Error",
                 f"Could not read frame {frame_num} from the video.",
             )
+            self._restore_overlay_for_current_clip()
             return
 
         detector = self._get_or_create_detector(model_path)
@@ -1637,6 +1655,7 @@ class ReviewPage(QWidget):
             QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
+            self._restore_overlay_for_current_clip()
             return
 
         del self._plate_data[selected]
@@ -1657,7 +1676,7 @@ class ReviewPage(QWidget):
             self._update_show_phone_filter_enabled()
         else:
             self._save_plates()
-            self._sync_overlay_to_current_clip()
+            self._restore_overlay_for_current_clip()
 
         self._refresh_plate_list()
         self._update_frame_buttons()
