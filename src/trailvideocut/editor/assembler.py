@@ -239,7 +239,6 @@ class VideoAssembler:
         if not plate_data or not self.config.plate_blur_enabled:
             return [None] * len(segments), 0.0, ""
 
-        from trailvideocut.editor.exporter import _detect_pts_gap_keyframe
         from trailvideocut.plate.blur import PlateBlurProcessor
 
         fw, fh, source_fps, rational_fps = self._probe_source_video()
@@ -250,16 +249,6 @@ class VideoAssembler:
             if cpd is None or not cpd.detections:
                 result.append(None)
                 continue
-
-            # Detect PTS gap for piecewise offset correction (same
-            # approach as the DaVinci Lua script's comp_for_rel).
-            seg_start_frame = int(start * source_fps)
-            seg_end_frame = int((start + dur) * source_fps)
-            pts_gap_kf = _detect_pts_gap_keyframe(
-                Path(self.config.video_path),
-                seg_start_frame,
-                seg_end_frame,
-            )
 
             console.print(f"  Pre-processing blur for segment {seg_idx + 1} (clip {clip_idx})...")
             proc = PlateBlurProcessor(
@@ -272,7 +261,6 @@ class VideoAssembler:
                 frame_height=fh,
                 clip_index=clip_idx,
                 rational_fps=rational_fps,
-                pts_gap_keyframe=pts_gap_kf,
             )
             tmp_path, frames_written = proc.process_segment(
                 progress_callback=self._progress_callback,

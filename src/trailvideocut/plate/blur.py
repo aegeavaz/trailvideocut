@@ -398,7 +398,6 @@ class PlateBlurProcessor:
         clip_index: int = -1,
         detector: "PlateDetector | None" = None,
         rational_fps: str = "",
-        pts_gap_keyframe: int | None = None,
     ):
         self._video_path = str(video_path)
         self._segment_start = segment_start
@@ -410,7 +409,6 @@ class PlateBlurProcessor:
         self._clip_index = clip_index
         self._detector = detector
         self._rational_fps = rational_fps or str(fps)
-        self._pts_gap_keyframe = pts_gap_keyframe
 
     def _get_boxes_for_frame(
         self,
@@ -460,16 +458,11 @@ class PlateBlurProcessor:
     ) -> tuple[Path, int]:
         """Read segment frames, blur plate regions, write to a temp file.
 
-        Applies the same piecewise frame-sync correction as the DaVinci
-        Lua script's ``comp_for_rel()``: OpenCV's seek to a mid-GOP
-        inter-frame causes a +1 frame offset until the decoder resyncs
-        at the next keyframe.  The first keyframe in the segment is
-        detected via ffprobe (or ffmpeg fallback), and frames before it
-        use ``lookup_frame = abs_frame + 1``; after, ``abs_frame``.
-
-        Uses **nearest-neighbor lookup** within ±2 frames for precise
-        box matching (same as ``_nearest_box_for_frame`` in the Lua
-        script).
+        Blur boxes for the frame at source-video index ``abs_frame`` are
+        looked up using ``abs_frame`` itself as the key — the same integer
+        key the detector writes into ``ClipPlateData.detections``. Falls
+        back to nearest-neighbour lookup within ±2 frames for precise box
+        matching when an exact key is missing.
 
         Returns ``(path, frames_written)``.
         """
@@ -519,15 +512,7 @@ class PlateBlurProcessor:
                     if not ret:
                         break
 
-                    # The blur pipeline's cap.set() lands mid-GOP for most
-                    # segments, so OpenCV returns source frame (abs_frame+1)
-                    # content for the entire segment — it never resyncs
-                    # because the segment typically ends before the decoder
-                    # catches up. The detector, which drives clip-scoped
-                    # scans from keyframe-aligned starts, doesn't have this
-                    # offset, so we compensate by always looking up
-                    # abs_frame+1.
-                    lookup_frame = abs_frame + 1
+                    lookup_frame = abs_frame
 
                     boxes = self._nearest_boxes(dets, lookup_frame)
                     if not boxes:

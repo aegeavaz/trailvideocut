@@ -99,7 +99,6 @@ def _generate_lua_script_for_clip(
     detections: dict[str, list[dict]],
     frame_count: int,
     src_start_frame: int,
-    pts_gap_keyframe: int | None = None,
 ) -> str:
     """Generate a Fusion Lua script that adds blur nodes to the current comp.
 
@@ -121,18 +120,6 @@ def _generate_lua_script_for_clip(
 
     This corrects for crossfade leading/trailing handle frames that
     Resolve adds to the Fusion comp around the actual clip content.
-
-    *pts_gap_keyframe* — if the source video was concatenated from
-    multiple clips, the merge can introduce a PTS discontinuity that
-    leaves Resolve's decoder off by one frame for the entire clip's
-    playback (it does not resync within the clip's duration, mirroring
-    the OpenCV mid-GOP behaviour the MP4 path compensates for in
-    ``PlateBlurProcessor.process_segment``).  When non-nil, the Lua
-    script shifts every keyframe back by 1 comp frame
-    (``comp_for_rel(rel) = clip_offset + rel - 1``); when nil, no
-    correction is applied.  The actual frame number is currently used
-    only as a diagnostic — its non-nil-ness is what gates the
-    correction.  See ``_detect_pts_gap_keyframe()`` in ``exporter.py``.
     """
     tracks = _group_into_tracks(detections)
     if not tracks:
@@ -188,26 +175,9 @@ def _generate_lua_script_for_clip(
         "        ' -> clip_offset=' .. clip_offset)",
         "end",
         "",
-        "-- PTS gap correction for concatenated source videos.",
-        "-- When the source was merged from multiple clips, a PTS discontinuity",
-        "-- causes Resolve's decoder to stay off by 1 frame for the entire",
-        "-- clip's playback (it does not resync within the clip's duration).",
-        "-- PTS_GAP_KEYFRAME is non-nil when such a gap exists before this",
-        "-- clip; in that case we shift every keyframe back by 1 comp frame.",
-        "-- See _detect_pts_gap_keyframe() in exporter.py and the matching",
-        "-- MP4 fix in PlateBlurProcessor (blur.py: lookup_frame = abs_frame + 1",
-        "-- for the whole segment).",
-        f"local PTS_GAP_KEYFRAME = {pts_gap_keyframe if pts_gap_keyframe is not None else 'nil'}",
-        "local pts_gap_offset = 0",
-        "if PTS_GAP_KEYFRAME then",
-        "  pts_gap_offset = -1",
-        "  print('PTS gap correction active: keyframe=' .. PTS_GAP_KEYFRAME ..",
-        "        ' shifting all keyframes by -1 comp frame')",
-        "end",
-        "",
         "-- Helper: compute the comp frame for a clip-relative frame.",
         "local function comp_for_rel(rel)",
-        "  return clip_offset + rel + pts_gap_offset",
+        "  return clip_offset + rel",
         "end",
         "",
         "-- Get frame dimensions (diagnostic only)",
@@ -405,7 +375,7 @@ def _group_into_tracks(
 
 
 def generate_fusion_scripts(
-    plate_clips: list[tuple[str, dict[str, list[dict]], float, int, int, int | None]],
+    plate_clips: list[tuple[str, dict[str, list[dict]], float, int, int]],
     output_dir: Path,
 ) -> list[Path]:
     """Generate Fusion Lua scripts for clips with plate data.
@@ -415,23 +385,17 @@ def generate_fusion_scripts(
 
     Parameters
     ----------
-    plate_clips : list of (clip_name, detections, fps, frame_count,
-                           src_start_frame, pts_gap_keyframe)
+    plate_clips : list of (clip_name, detections, fps, frame_count, src_start_frame)
         - src_start_frame is the absolute source-video frame number that
           the clip's source_range starts at.
-        - pts_gap_keyframe is the absolute source frame of the first
-          keyframe within the clip's content range if a PTS gap was
-          detected before this clip (None otherwise).  Used for
-          piecewise offset correction.
     output_dir : Path to write .lua files
 
     Returns list of generated .lua file paths.
     """
     paths = []
-    for clip_name, detections, _fps, frame_count, src_start_frame, pts_gap_kf in plate_clips:
+    for clip_name, detections, _fps, frame_count, src_start_frame in plate_clips:
         content = _generate_lua_script_for_clip(
             clip_name, detections, frame_count, src_start_frame,
-            pts_gap_keyframe=pts_gap_kf,
         )
         if not content:
             continue

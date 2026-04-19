@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import subprocess
 from pathlib import Path
 
 import opentimelineio as otio
@@ -77,19 +76,12 @@ class DaVinciExporter:
                 clip_dets = _build_clip_detections(cpd, src_start_frame, src_end_frame)
                 if clip_dets:
                     frame_count = src_end_frame - src_start_frame
-                    # Detect PTS gap from concatenated source videos.
-                    # This is cached after the first call since the gap
-                    # position is a property of the source file, not the clip.
-                    pts_gap_kf = _detect_pts_gap_keyframe(
-                        video_path, src_start_frame, src_end_frame,
-                    )
                     plate_clips.append((
                         f"segment_{i + 1:03d}",
                         clip_dets,
                         fps,
                         frame_count,
                         src_start_frame,
-                        pts_gap_kf,
                     ))
 
             if plate_clips:
@@ -176,97 +168,6 @@ def _build_clip_detections(
             for b in boxes
         ]
     return result
-
-
-def _detect_pts_gap_keyframe(
-    video_path: Path,
-    src_start_frame: int,
-    src_end_frame: int,
-) -> int | None:
-    """Detect if a PTS gap in the source video requires piecewise offset correction.
-
-    Concatenated ("merged") source videos can have a PTS discontinuity at
-    the join point.  When Resolve's decoder encounters such a gap, it is
-    off by one frame until it resyncs at the next keyframe.  This function
-    detects the gap and returns the first keyframe *within the clip's
-    content range* so the Lua generator can apply a piecewise correction.
-
-    Returns the absolute source frame number of the first keyframe in
-    ``[src_start_frame, src_end_frame)`` if a PTS gap exists before the
-    clip, or ``None`` if no correction is needed.
-    """
-    from trailvideocut.gpu import _find_ffprobe
-
-    ffprobe_bin = _find_ffprobe()
-    if ffprobe_bin is None:
-        return None
-
-    try:
-        result = subprocess.run(
-            [
-                ffprobe_bin, "-v", "error",
-                "-select_streams", "v:0",
-                "-show_entries", "packet=pts,flags",
-                "-of", "csv=p=0",
-                str(video_path),
-            ],
-            capture_output=True, text=True, timeout=120,
-        )
-    except (subprocess.TimeoutExpired, OSError):
-        logger.warning("ffprobe failed for PTS gap detection; skipping correction")
-        return None
-
-    if result.returncode != 0:
-        return None
-
-    # Single pass: detect PTS gap before the clip AND find the first
-    # keyframe within the clip's content range.
-    has_gap_before_clip = False
-    first_keyframe_in_clip: int | None = None
-    expected_delta: int | None = None
-    prev_pts: int | None = None
-    frame_idx = 0
-
-    for line in result.stdout.splitlines():
-        parts = line.strip().split(",")
-        if len(parts) < 2:
-            frame_idx += 1
-            continue
-        try:
-            pts = int(parts[0])
-        except ValueError:
-            frame_idx += 1
-            continue
-        flags = parts[1] if len(parts) > 1 else ""
-
-        if prev_pts is not None:
-            delta = pts - prev_pts
-            if expected_delta is None:
-                expected_delta = delta
-            elif delta != expected_delta and frame_idx <= src_start_frame:
-                has_gap_before_clip = True
-
-        # Track keyframes within the clip range
-        if (has_gap_before_clip
-                and first_keyframe_in_clip is None
-                and src_start_frame <= frame_idx < src_end_frame
-                and "K" in flags):
-            first_keyframe_in_clip = frame_idx
-
-        # Once we've found what we need, stop scanning
-        if first_keyframe_in_clip is not None:
-            break
-
-        prev_pts = pts
-        frame_idx += 1
-
-    if first_keyframe_in_clip is not None:
-        logger.info(
-            "PTS gap detected before clip [%d, %d); "
-            "first keyframe in clip at frame %d",
-            src_start_frame, src_end_frame, first_keyframe_in_clip,
-        )
-    return first_keyframe_in_clip
 
 
 def _parse_timecode(tc: str | None, fps: float) -> otio.opentime.RationalTime:
