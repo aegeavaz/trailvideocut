@@ -255,7 +255,9 @@ class VideoPlayer(QWidget):
         self._slider.set_excluded_spans(self._excluded_ranges, self.duration)
 
     def seek_to(self, seconds: float):
-        self._seek(int(seconds * 1000))
+        frame = position_to_frame(max(seconds, 0.0), self._fps)
+        target_ms = self._frame_center_ms(frame)
+        self._seek(min(target_ms, self._duration_ms))
 
     def toggle_play(self):
         if self._on_transport:
