@@ -90,7 +90,7 @@ class PlateDetector:
     def __init__(
         self,
         model_path: str | Path,
-        confidence_threshold: float = 0.05,
+        confidence_threshold: float = 0.20,
         exclude_phones: bool = False,
         phone_redetect_every: int = _PHONE_REDETECT_EVERY,
         verbose: bool = False,

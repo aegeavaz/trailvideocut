@@ -245,10 +245,18 @@ def detect_plates(
     ),
     start: float = typer.Option(0.0, "--start", help="Start time in seconds"),
     end: float = typer.Option(0.0, "--end", help="End time in seconds (0 = end of video)"),
-    threshold: float = typer.Option(0.1, "--threshold", help="Minimum detection confidence"),
+    threshold: float = typer.Option(0.20, "--threshold", help="Minimum detection confidence"),
     every_n: int = typer.Option(1, "--every-n", help="Process every Nth frame (1 = all frames)"),
     model: Optional[Path] = typer.Option(
         None, "--model", help="Custom ONNX model path (overrides default model)"
+    ),
+    plate_model: str = typer.Option(
+        "m", "--plate-model",
+        help="Plate detection model variant: n (YOLOv8n, fast), "
+             "s (YOLOv11s, medium, ~3× slower), "
+             "m (YOLOv11m, slow, ~8× slower, default). "
+             "Ignored when --model is given.",
+        case_sensitive=True,
     ),
     tiled: bool = typer.Option(
         True, "--tiled/--no-tiled", help="Use tiled detection for small plates (default: tiled)"
@@ -276,6 +284,12 @@ def detect_plates(
 
     from trailvideocut.plate.model_manager import download_model, get_model_path
 
+    if plate_model not in {"n", "s", "m"}:
+        raise typer.BadParameter(
+            f"Invalid --plate-model {plate_model!r}. "
+            "Must be one of: n, s, m.",
+        )
+
     console.print("[bold]Plate Detection Debug[/]")
     console.print(f"  Video: {video}")
     console.print(f"  Output: {output_dir}")
@@ -286,14 +300,17 @@ def detect_plates(
         console.print(f"  Sampling: every {every_n} frames")
     console.print()
 
-    # Resolve model: custom path > cached > download
+    # Resolve model: custom path > cached variant > download variant
     if model:
         model_path = model
         console.print(f"  Model: {model_path} (custom)")
     else:
-        model_path = get_model_path()
+        console.print(f"  Variant: {plate_model}")
+        model_path = get_model_path(plate_model)
     if model_path is None:
-        console.print("[yellow]Downloading plate detection model...[/]")
+        console.print(
+            f"[yellow]Downloading plate detection model (variant {plate_model})...[/]"
+        )
         try:
             with Progress() as progress:
                 task = progress.add_task("Downloading model...", total=None)
@@ -302,7 +319,9 @@ def detect_plates(
                     if total > 0:
                         progress.update(task, total=total, completed=downloaded)
 
-                model_path = download_model(progress_callback=_dl_progress)
+                model_path = download_model(
+                    plate_model, progress_callback=_dl_progress,
+                )
             console.print(f"[green]Model downloaded:[/] {model_path}\n")
         except Exception as e:
             console.print(f"[bold red]Download failed:[/] {e}")

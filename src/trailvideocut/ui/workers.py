@@ -253,17 +253,30 @@ class PlateDetectionWorker(QThread):
 
 
 class ModelDownloadWorker(QThread):
-    """Downloads the plate detection ONNX model with progress reporting."""
+    """Downloads the plate detection ONNX model with progress reporting.
+
+    The ``variant`` selects which entry in the model-manager registry is
+    downloaded. Defaults to ``"m"`` — the largest / most-accurate variant.
+    """
 
     progress = Signal(int, int)  # bytes_downloaded, total_bytes
     finished = Signal(str)  # path to downloaded model
     error = Signal(str)
+
+    def __init__(self, parent=None, variant: str = "m"):
+        super().__init__(parent)
+        self._variant = variant
+
+    def set_variant(self, variant: str) -> None:
+        """Update the variant to download on the next ``start()``."""
+        self._variant = variant
 
     def run(self):
         try:
             from trailvideocut.plate.model_manager import download_model
 
             path = download_model(
+                self._variant,
                 progress_callback=lambda d, t: self.progress.emit(d, t),
             )
             self.finished.emit(str(path))

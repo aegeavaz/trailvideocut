@@ -72,9 +72,30 @@ trailvideocut cut ride.mp4 song.mp3 --no-gpu
 trailvideocut analyze --audio song.mp3
 trailvideocut analyze --video ride.mp4
 
+# Run plate detection with the default (YOLOv11m) model
+trailvideocut detect-plates ride.mp4 -o plate_debug
+
+# Drop to a smaller/faster backbone when per-frame latency matters
+# (s ≈ 3× faster than m; n ≈ 8× faster than m but with lower recall)
+trailvideocut detect-plates ride.mp4 --plate-model s
+trailvideocut detect-plates ride.mp4 --plate-model n
+
 # Launch the GUI
 trailvideocut ui
 ```
+
+**Plate detection model (`--plate-model {n,s,m}`)** — selects which ONNX
+backbone runs plate detection. Default `m` is YOLOv11m (best recall and
+box tightness on small or distant plates, ~8× slower than `n`). `s`
+(YOLOv11s, ~3× slower than `n`) is the middle ground, and `n` is the
+existing YOLOv8n (fastest). `s` and `m` are fine-tuned plate detectors
+published by `morsetechlab/yolov11-license-plate-detection`; larger
+variants may regress the false-positive rate at low confidence
+thresholds, so the GUI default confidence was raised to 20% to compensate.
+Each variant is cached under its own filename, so switching between them
+never forces a re-download after the first use. The Review-page GUI
+exposes the same choice via a "Plate Model" combo-box next to the other
+detection controls.
 
 ### GUI
 

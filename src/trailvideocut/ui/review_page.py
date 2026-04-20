@@ -6,6 +6,7 @@ from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QComboBox,
     QDoubleSpinBox,
     QGroupBox,
     QSpinBox,
@@ -212,10 +213,30 @@ class ReviewPage(QWidget):
 
         # Row 2: All detection settings in one row
         settings_row = QHBoxLayout()
+        settings_row.addWidget(QLabel("Plate Model:"))
+        self._combo_plate_model = QComboBox()
+        # (display label, variant id) pairs, ordered by size.
+        for label, variant_id in (
+            ("YOLOv8n (fast)", "n"),
+            ("YOLOv11s (medium, ~3× slower)", "s"),
+            ("YOLOv11m (slow, ~8× slower, default)", "m"),
+        ):
+            self._combo_plate_model.addItem(label, variant_id)
+        # Default selection: "m" (index 2) — largest / most-accurate variant.
+        self._combo_plate_model.setCurrentIndex(2)
+        self._combo_plate_model.setToolTip(
+            "Plate-detection model size. Default is 'm' (YOLOv11m) for best "
+            "recall and box tightness on small/distant plates; drop to 's' "
+            "or 'n' if per-frame latency is too high (s ≈ 3× n, m ≈ 8× n). "
+            "Larger variants may regress the false-positive rate at low "
+            "confidence thresholds."
+        )
+        settings_row.addWidget(self._combo_plate_model)
+
         settings_row.addWidget(QLabel("Confidence:"))
         self._spin_confidence = QDoubleSpinBox()
         self._spin_confidence.setRange(0.01, 1.0)
-        self._spin_confidence.setValue(0.05)
+        self._spin_confidence.setValue(0.20)
         self._spin_confidence.setSingleStep(0.05)
         self._spin_confidence.setToolTip("Minimum confidence threshold for plate detection")
         settings_row.addWidget(self._spin_confidence)
@@ -912,17 +933,18 @@ class ReviewPage(QWidget):
             )
             return
 
-        # Check if model is already cached
-        model_path = get_model_path()
+        # Check if model for the selected variant is already cached
+        variant = self._current_plate_variant()
+        model_path = get_model_path(variant)
         if model_path is not None:
             if self._chk_debug_plates.isChecked():
-                print(f"[PlateDetect] Model found at {model_path}")
+                print(f"[PlateDetect] Model ({variant}) found at {model_path}")
             self._start_plate_detection(str(model_path))
             return
 
         # Model not cached — download it
         if self._chk_debug_plates.isChecked():
-            print("[PlateDetect] Model not found, starting download...")
+            print(f"[PlateDetect] Model ({variant}) not found, starting download...")
         self._start_model_download()
 
     def _start_model_download(self):
@@ -937,7 +959,9 @@ class ReviewPage(QWidget):
         self._download_dialog.setAutoClose(False)
         self._download_dialog.setAutoReset(False)
 
-        self._download_worker = ModelDownloadWorker(parent=self)
+        self._download_worker = ModelDownloadWorker(
+            parent=self, variant=self._current_plate_variant(),
+        )
         self._download_worker.progress.connect(self._on_download_progress)
         self._download_worker.finished.connect(self._on_download_finished)
         self._download_worker.error.connect(self._on_download_error)
@@ -1518,6 +1542,11 @@ class ReviewPage(QWidget):
 
     # --- Single-frame detection ---
 
+    def _current_plate_variant(self) -> str:
+        """Return the currently-selected plate-model variant ("n" | "s" | "m")."""
+        variant = self._combo_plate_model.currentData()
+        return variant if variant in {"n", "s", "m"} else "m"
+
     def _get_detector_settings(self) -> tuple:
         """Return a tuple fingerprint of current UI detection settings."""
         return (
@@ -1560,7 +1589,7 @@ class ReviewPage(QWidget):
         if not clips or not self._video_path:
             return
 
-        model_path = get_model_path()
+        model_path = get_model_path(self._current_plate_variant())
         if model_path is not None:
             self._run_single_frame_detection(str(model_path))
             return

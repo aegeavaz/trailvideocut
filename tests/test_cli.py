@@ -129,3 +129,81 @@ class TestCutCommandExclusionOptions:
         )
         assert result.exit_code != 0
         assert "start < end" in (result.output or "")
+
+
+class TestDetectPlatesPlateModelFlag:
+    """§4.2 — `detect-plates --plate-model {n,s,m}` is parsed and routed.
+
+    The command is short-circuited by patching `download_model` to raise so
+    that no video decoder actually runs; we only care that the flag reaches
+    the model resolver with the correct variant.
+    """
+
+    def _run(self, runner, video, extra_args):
+        captured: dict[str, object] = {}
+
+        def fake_get_path(variant="n"):
+            captured["get_variant"] = variant
+            return None  # force the download branch below
+
+        def fake_download(variant="n", progress_callback=None):
+            captured["download_variant"] = variant
+            raise RuntimeError("short-circuit: stop before cv2.VideoCapture")
+
+        with patch(
+            "trailvideocut.plate.model_manager.get_model_path", fake_get_path,
+        ), patch(
+            "trailvideocut.plate.model_manager.download_model", fake_download,
+        ):
+            result = runner.invoke(
+                app, ["detect-plates", str(video), *extra_args],
+            )
+        return result, captured
+
+    def test_defaults_to_m_when_flag_omitted(self, runner, tmp_path):
+        video = tmp_path / "v.mp4"
+        video.touch()
+        result, captured = self._run(runner, video, [])
+        # Resolver and downloader both see the default "m".
+        assert captured.get("get_variant") == "m"
+        assert captured.get("download_variant") == "m"
+        # Exit is non-zero (we short-circuited inside download_model).
+        assert result.exit_code != 0
+
+    def test_accepts_s_variant(self, runner, tmp_path):
+        video = tmp_path / "v.mp4"
+        video.touch()
+        result, captured = self._run(
+            runner, video, ["--plate-model", "s"],
+        )
+        assert captured.get("get_variant") == "s"
+        assert captured.get("download_variant") == "s"
+        assert result.exit_code != 0  # short-circuit
+
+    def test_accepts_m_variant(self, runner, tmp_path):
+        video = tmp_path / "v.mp4"
+        video.touch()
+        result, captured = self._run(
+            runner, video, ["--plate-model", "m"],
+        )
+        assert captured.get("get_variant") == "m"
+        assert captured.get("download_variant") == "m"
+
+    def test_rejects_bogus_variant(self, runner, tmp_path):
+        video = tmp_path / "v.mp4"
+        video.touch()
+        # No patching needed: validation runs before any import/call.
+        result = runner.invoke(
+            app, ["detect-plates", str(video), "--plate-model", "bogus"],
+        )
+        assert result.exit_code != 0
+        assert "bogus" in (result.output or "")
+
+    def test_rejects_uppercase_variant(self, runner, tmp_path):
+        """Variant keys are case-sensitive (mirrors model_manager behaviour)."""
+        video = tmp_path / "v.mp4"
+        video.touch()
+        result = runner.invoke(
+            app, ["detect-plates", str(video), "--plate-model", "N"],
+        )
+        assert result.exit_code != 0
