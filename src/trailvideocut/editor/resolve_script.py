@@ -35,6 +35,12 @@ _BLUR_SIZE_MIN = 1.5
 _BLUR_SIZE_MAX = 2.5
 
 
+def _plate_angle_to_fusion(angle: float) -> float:
+    # Flip sign: PlateBox angles are applied in image-space Y-down coords,
+    # Fusion's RectangleMask.Angle is Y-up — same inversion as ``cy``.
+    return -float(angle)
+
+
 def _nearest_box_for_frame(
     track: dict[int, dict],
     frame: int,
@@ -225,15 +231,16 @@ def _generate_lua_script_for_clip(
         #   Width:    image-width-relative  (Width = 1.0 = full image width)
         #   Height:   image-height-relative (Height = 1.0 = full image height)
         # PlateBox stores Y top-down, so we invert Y for Fusion.
-        kf_data: list[tuple[int, float, float, float, float]] = []
-        # (frame, cx, cy, w, h)
+        kf_data: list[tuple[int, float, float, float, float, float]] = []
+        # (frame, cx, cy, w, h, angle_fusion)
         for f in range(frame_count):
             box = _nearest_box_for_frame(track, f, _NEAREST_WINDOW)
             if box is None:
                 continue
             cx = box["x"] + box["w"] / 2
             cy = 1.0 - (box["y"] + box["h"] / 2)
-            kf_data.append((f, cx, cy, box["w"], box["h"]))
+            angle_fusion = _plate_angle_to_fusion(box.get("angle", 0.0))
+            kf_data.append((f, cx, cy, box["w"], box["h"], angle_fusion))
 
         # Compute boundary frames for zero-size keyframes.
         # Fusion holds the first/last keyframe value for all frames outside
@@ -246,7 +253,7 @@ def _generate_lua_script_for_clip(
         # Per-track diagnostic: print the first keyframe so the user can
         # cross-check Center / sizes against the preview overlay at runtime.
         if kf_data:
-            first_f, first_cx, first_cy, first_w, first_h = kf_data[0]
+            first_f, first_cx, first_cy, first_w, first_h, _first_a = kf_data[0]
             lines.append(
                 f"print(string.format('  track {ti + 1} first kf: frame %d "
                 f"Center={{%.4f, %.4f}} Width=%.4f Height=%.4f', "
@@ -261,7 +268,7 @@ def _generate_lua_script_for_clip(
         lines.append(f"{mask_var}.Center = XYPath({{}})")
         if first_kf_frame > 0:
             lines.append(f"{mask_var}.Center[comp_for_rel({first_kf_frame - 1})] = {{0.5, 0.5}}")
-        for frame, cx, cy, _w, _h in kf_data:
+        for frame, cx, cy, _w, _h, _a in kf_data:
             lines.append(f"{mask_var}.Center[comp_for_rel({frame})] = {{{cx}, {cy}}}")
         if last_kf_frame + 1 < frame_count:
             lines.append(f"{mask_var}.Center[comp_for_rel({last_kf_frame + 1})] = {{0.5, 0.5}}")
@@ -270,7 +277,7 @@ def _generate_lua_script_for_clip(
         lines.append(f"{mask_var}.Width = BezierSpline({{}})")
         if first_kf_frame > 0:
             lines.append(f"{mask_var}.Width[comp_for_rel({first_kf_frame - 1})] = 0")
-        for frame, _cx, _cy, w, _h in kf_data:
+        for frame, _cx, _cy, w, _h, _a in kf_data:
             lines.append(f"{mask_var}.Width[comp_for_rel({frame})] = {w}")
         if last_kf_frame + 1 < frame_count:
             lines.append(f"{mask_var}.Width[comp_for_rel({last_kf_frame + 1})] = 0")
@@ -279,14 +286,23 @@ def _generate_lua_script_for_clip(
         lines.append(f"{mask_var}.Height = BezierSpline({{}})")
         if first_kf_frame > 0:
             lines.append(f"{mask_var}.Height[comp_for_rel({first_kf_frame - 1})] = 0")
-        for frame, _cx, _cy, _w, h in kf_data:
+        for frame, _cx, _cy, _w, h, _a in kf_data:
             lines.append(f"{mask_var}.Height[comp_for_rel({frame})] = {h}")
         if last_kf_frame + 1 < frame_count:
             lines.append(f"{mask_var}.Height[comp_for_rel({last_kf_frame + 1})] = 0")
 
+        lines.append("-- Animate mask angle")
+        lines.append(f"{mask_var}.Angle = BezierSpline({{}})")
+        if first_kf_frame > 0:
+            lines.append(f"{mask_var}.Angle[comp_for_rel({first_kf_frame - 1})] = 0")
+        for frame, _cx, _cy, _w, _h, a in kf_data:
+            lines.append(f"{mask_var}.Angle[comp_for_rel({frame})] = {a}")
+        if last_kf_frame + 1 < frame_count:
+            lines.append(f"{mask_var}.Angle[comp_for_rel({last_kf_frame + 1})] = 0")
+
         # Readback diagnostic for the first track only.
         if ti == 0 and kf_data:
-            first_f, _, _, _, _ = kf_data[0]
+            first_f, _, _, _, _, _ = kf_data[0]
             lines.append(
                 f"local rb_frame = comp_for_rel({first_f})"
             )
@@ -313,7 +329,7 @@ def _generate_lua_script_for_clip(
         lines.append(f"{blur_var}.XBlurSize = BezierSpline({{}})")
         if first_kf_frame > 0:
             lines.append(f"{blur_var}.XBlurSize[comp_for_rel({first_kf_frame - 1})] = 0")
-        for frame, _cx, _cy, _w, _h in kf_data:
+        for frame, _cx, _cy, _w, _h, _a in kf_data:
             bs = blur_sizes.get((ti, frame), _BLUR_SIZE_MIN)
             lines.append(
                 f"{blur_var}.XBlurSize[comp_for_rel({frame})] = {bs}"
@@ -740,10 +756,12 @@ def apply_blur_to_clip(comp, tracks, frame_width, frame_height):
             # Y-UP origin (0=bottom, 1=top); PlateBox uses Y-down so we
             # invert.  Width/Height are independent image-relative
             # fractions, same as PlateBox, so passed through directly.
+            # Angle is flipped for the same Y-axis reason as center_y.
             center_x = box["x"] + box["w"] / 2
             center_y = 1.0 - (box["y"] + box["h"] / 2)
             width = box["w"]
             height = box["h"]
+            angle = -float(box.get("angle", 0.0))
 
             # Auto-scaled blur size: smallest plate area -> 1.5, largest -> 2.5
             box_area = box["w"] * box["h"]
@@ -755,6 +773,7 @@ def apply_blur_to_clip(comp, tracks, frame_width, frame_height):
             mask.SetInput("Center", {{1: center_x, 2: center_y}}, frame_num)
             mask.SetInput("Width", width, frame_num)
             mask.SetInput("Height", height, frame_num)
+            mask.SetInput("Angle", angle, frame_num)
             blur.SetInput("XBlurSize", blur_size, frame_num)
 
         applied += 1

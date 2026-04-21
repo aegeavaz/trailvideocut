@@ -164,6 +164,7 @@ def _build_clip_detections(
                 "y": float(b.y),
                 "w": float(b.w),
                 "h": float(b.h),
+                "angle": float(b.angle),
             }
             for b in boxes
         ]

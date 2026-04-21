@@ -128,12 +128,29 @@ class TestBuildClipDetections:
         )
         result = _build_clip_detections(cpd, src_start_frame=0, src_end_frame=10)
         box = result["5"][0]
-        for key in ("x", "y", "w", "h"):
+        for key in ("x", "y", "w", "h", "angle"):
             assert isinstance(box[key], float), f"{key} is not a float: {type(box[key])}"
 
     def test_empty_detections_returns_empty_dict(self):
         cpd = ClipPlateData(clip_index=0, detections={})
         assert _build_clip_detections(cpd, 0, 100) == {}
+
+    def test_angle_serialized_for_rotated_plate(self):
+        """The `angle` field is carried through to the export payload so
+        DaVinci's Fusion mask can be rotated to match the preview overlay."""
+        cpd = ClipPlateData(
+            clip_index=0,
+            detections={
+                5: [
+                    PlateBox(0.1, 0.2, 0.05, 0.03, angle=22.5),
+                    PlateBox(0.5, 0.5, 0.05, 0.03, angle=0.0),
+                ],
+            },
+        )
+        result = _build_clip_detections(cpd, src_start_frame=0, src_end_frame=10)
+        rotated, aligned = result["5"]
+        assert rotated["angle"] == 22.5
+        assert aligned["angle"] == 0.0
 
 
 # ---------------------------------------------------------------------------
