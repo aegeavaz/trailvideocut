@@ -2,7 +2,7 @@ from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
-from trailvideocut.editor.models import EditDecision
+from trailvideocut.editor.models import CutPlan, EditDecision, tail_frames
 
 _MARGIN_LEFT = 30
 _MARGIN_RIGHT = 5
@@ -37,6 +37,12 @@ class TimelineWidget(QWidget):
         self._cursor_time: float = -1.0
         self._cursor_color: str = "#42A5F5"
 
+        # Transition-tail metadata for rendering the tail sub-band. Stays None
+        # until set_transition_info(...) is called; when None, no tail band is
+        # drawn (defensive default for legacy call sites / CUT plans).
+        self._plan: CutPlan | None = None
+        self._fps: float = 0.0
+
         # Drag state
         self._drag_index = -1
         self._drag_offset = 0.0
@@ -54,6 +60,17 @@ class TimelineWidget(QWidget):
         self._video_duration = video_duration
         self._selected = -1
         self._cursor_time = -1.0
+        self.update()
+
+    def set_transition_info(self, plan: CutPlan, fps: float) -> None:
+        """Provide transition-style / crossfade-duration context for rendering.
+
+        The tail sub-band on non-last crossfade clips is computed from this;
+        ``set_data`` can still be called without it, in which case no tail
+        band is drawn (CUT plans or legacy callers).
+        """
+        self._plan = plan
+        self._fps = fps
         self.update()
 
     def set_cursor_position(self, seconds: float):
@@ -158,6 +175,30 @@ class TimelineWidget(QWidget):
         p.setPen(QPen(QColor("#444"), 1))
         p.drawRect(QRectF(_MARGIN_LEFT, y, self._track_width(), h))
 
+    def _tail_band_rect(self, clip_index: int) -> QRectF | None:
+        """Return the QRectF of clip ``clip_index``'s transition-tail band.
+
+        Returns ``None`` when the clip has no tail (last clip, CUT plan,
+        zero crossfade duration, or ``set_transition_info`` was never
+        called). The rect is positioned on the clip body's right edge, with
+        width equal to ``tail_frames(...) / fps`` seconds at the current
+        pixel-per-second scale.
+        """
+        if self._plan is None or self._fps <= 0:
+            return None
+        if not (0 <= clip_index < len(self._clips)):
+            return None
+        tail = tail_frames(clip_index, self._plan, self._fps)
+        if tail <= 0:
+            return None
+        clip = self._clips[clip_index]
+        tail_secs = tail / self._fps
+        x_end = self._time_to_x(clip.source_end)
+        x_tail_end = self._time_to_x(clip.source_end + tail_secs)
+        y = self.RULER_HEIGHT + self.SECTION_HEIGHT + 4
+        h = self.TRACK_HEIGHT - 8
+        return QRectF(x_end, y, max(0.5, x_tail_end - x_end), h)
+
     def _draw_clips(self, p: QPainter):
         y = self.RULER_HEIGHT + self.SECTION_HEIGHT + 4
         h = self.TRACK_HEIGHT - 8
@@ -182,6 +223,18 @@ class TimelineWidget(QWidget):
             p.setPen(QPen(border_color, border_width))
             p.setBrush(Qt.NoBrush)
             p.drawRoundedRect(QRectF(x1, y, w, h), 3, 3)
+
+            # Transition-tail sub-band (non-last crossfade clips only).
+            tail_rect = self._tail_band_rect(i)
+            if tail_rect is not None:
+                tail_color = color.lighter(160)
+                tail_color.setAlpha(140)
+                p.setPen(Qt.NoPen)
+                p.setBrush(QBrush(tail_color))
+                p.drawRect(tail_rect)
+                p.setPen(QPen(QColor("#ffcc66"), 1, Qt.DashLine))
+                p.setBrush(Qt.NoBrush)
+                p.drawRect(tail_rect)
 
             # Clip index label
             if w > 20:

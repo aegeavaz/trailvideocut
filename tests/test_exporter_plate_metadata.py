@@ -135,6 +135,38 @@ class TestBuildClipDetections:
         cpd = ClipPlateData(clip_index=0, detections={})
         assert _build_clip_detections(cpd, 0, 100) == {}
 
+    def test_tail_widens_upper_bound_for_crossfade_non_last(self):
+        # plate-clip-transition-tail: passing tail=6 widens the half-open
+        # filter to [start, end + 6). Plates in the tail band SHALL appear
+        # in the result at clip-relative offsets beyond (end - start) - 1.
+        cpd = ClipPlateData(
+            clip_index=0,
+            detections={
+                10: [PlateBox(0.1, 0.2, 0.05, 0.03)],   # core (rel 0)
+                11: [PlateBox(0.1, 0.2, 0.05, 0.03)],   # core (rel 1)
+                12: [PlateBox(0.1, 0.2, 0.05, 0.03)],   # tail (rel 2)
+                13: [PlateBox(0.1, 0.2, 0.05, 0.03)],   # tail (rel 3)
+                16: [PlateBox(0.1, 0.2, 0.05, 0.03)],   # past tail → excluded
+            },
+        )
+        result = _build_clip_detections(
+            cpd, src_start_frame=10, src_end_frame=12, tail=4,
+        )
+        assert sorted(result.keys(), key=int) == ["0", "1", "2", "3"]
+
+    def test_tail_defaults_to_zero_preserves_legacy_behaviour(self):
+        # Existing callers that do not pass `tail` SHALL see the current
+        # half-open [start, end) behaviour unchanged.
+        cpd = ClipPlateData(
+            clip_index=0,
+            detections={
+                10: [PlateBox(0.1, 0.2, 0.05, 0.03)],
+                12: [PlateBox(0.1, 0.2, 0.05, 0.03)],   # excluded
+            },
+        )
+        result = _build_clip_detections(cpd, src_start_frame=10, src_end_frame=12)
+        assert list(result.keys()) == ["0"]
+
     def test_angle_serialized_for_rotated_plate(self):
         """The `angle` field is carried through to the export payload so
         DaVinci's Fusion mask can be rotated to match the preview overlay."""
@@ -263,6 +295,91 @@ class TestFrameOffsetMapping:
         # clip-relative frame 0.
         detections = clip.metadata["trailvideocut"]["plates"]["detections"]
         assert "0" in detections, detections.keys()
+
+    def test_tail_region_plate_included_for_non_last_crossfade_clip(self, tmp_path):
+        # plate-clip-transition-tail: a plate at source_end_frame + 3 on a
+        # non-last crossfade clip SHALL appear in that clip's metadata at
+        # the correct relative offset.
+        fps = 30.0
+        video = tmp_path / "src.mp4"
+        audio = tmp_path / "audio.mp3"
+        plan = CutPlan(
+            decisions=[
+                _decision(0.0, 4.0),  # core frames [0, 120)
+                _decision(4.0, 8.0),  # core frames [120, 240)
+            ],
+            total_duration=8.0,
+            song_tempo=120.0,
+            transition_style="crossfade",
+            crossfade_duration=0.2,  # 6-frame tail on clip 0
+        )
+        plate_data = {
+            0: ClipPlateData(
+                clip_index=0,
+                detections={
+                    # Plate at source-frame 123 is 3 frames into clip 0's tail.
+                    123: [PlateBox(0.1, 0.2, 0.05, 0.03)],
+                },
+            ),
+        }
+        timeline = _generate_otio_timeline(
+            plan, video_path=video, video_duration=10.0, audio_path=audio,
+            r_frame_rate="30/1", timecode=None, plate_data=plate_data, fps=fps,
+        )
+        clips = list(timeline.video_tracks()[0].find_clips())
+        dets0 = clips[0].metadata["trailvideocut"]["plates"]["detections"]
+        # 123 - 0 = 123 relative offset (past the nominal clip length of 120).
+        assert "123" in dets0, dets0.keys()
+
+    def test_tail_region_plate_excluded_on_cut_plan(self, tmp_path):
+        # Regression guard: on CUT plans tail_frames == 0, so plates past
+        # source_end_frame are still excluded.
+        fps = 30.0
+        video = tmp_path / "src.mp4"
+        audio = tmp_path / "audio.mp3"
+        plan = _plan([_decision(0.0, 4.0), _decision(4.0, 8.0)])
+        plate_data = {
+            0: ClipPlateData(
+                clip_index=0,
+                detections={123: [PlateBox(0.1, 0.2, 0.05, 0.03)]},
+            ),
+        }
+        timeline = _generate_otio_timeline(
+            plan, video_path=video, video_duration=10.0, audio_path=audio,
+            r_frame_rate="30/1", timecode=None, plate_data=plate_data, fps=fps,
+        )
+        clips = list(timeline.video_tracks()[0].find_clips())
+        # clip 0 has no detections in-range → no metadata.
+        assert "trailvideocut" not in clips[0].metadata
+
+    def test_tail_region_plate_excluded_on_last_clip(self, tmp_path):
+        # The last clip has no tail even in a crossfade plan.
+        fps = 30.0
+        video = tmp_path / "src.mp4"
+        audio = tmp_path / "audio.mp3"
+        plan = CutPlan(
+            decisions=[
+                _decision(0.0, 4.0),
+                _decision(4.0, 8.0),
+            ],
+            total_duration=8.0,
+            song_tempo=120.0,
+            transition_style="crossfade",
+            crossfade_duration=0.2,
+        )
+        plate_data = {
+            1: ClipPlateData(
+                clip_index=1,
+                # absolute frame 243 is past clip 1's end (240, last clip).
+                detections={243: [PlateBox(0.1, 0.2, 0.05, 0.03)]},
+            ),
+        }
+        timeline = _generate_otio_timeline(
+            plan, video_path=video, video_duration=10.0, audio_path=audio,
+            r_frame_rate="30/1", timecode=None, plate_data=plate_data, fps=fps,
+        )
+        clips = list(timeline.video_tracks()[0].find_clips())
+        assert "trailvideocut" not in clips[1].metadata
 
     def test_plates_at_clip_boundary_exclusive_end(self, tmp_path):
         """``src_end_frame`` is half-open: a plate exactly at that frame

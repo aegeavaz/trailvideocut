@@ -358,6 +358,82 @@ class TestSrcStartFrameOffset:
 
 
 # ---------------------------------------------------------------------------
+# Transition-tail keyframes
+# ---------------------------------------------------------------------------
+
+
+class TestTailRegionKeyframes:
+    """plate-clip-transition-tail: the Fusion generator's ``comp_for_rel``
+    mapping is ``clip_offset + rel`` with no additive "tail offset" term —
+    tail-region rels land through exactly the same math as core rels."""
+
+    def test_tail_region_keyframe_lands_at_clip_offset_plus_rel(self):
+        # Core length 200, tail 6 → frame_count = 206. A detection at rel
+        # 203 (inside the tail) SHALL produce a keyframe at comp_for_rel(203).
+        detections = _make_detections({
+            100: {"x": 0.40, "y": 0.45, "w": 0.10, "h": 0.05},
+            203: {"x": 0.40, "y": 0.45, "w": 0.10, "h": 0.05},
+        })
+        script = _generate_lua_script_for_clip(
+            "clipA", detections, frame_count=206,
+            src_start_frame=1000,
+        )
+        center_frames = [
+            _parse_keyframe_frame(ln)
+            for ln in _find_keyframe_lines(script, "Center")
+        ]
+        assert 203 in center_frames, center_frames
+
+    def test_tail_detection_keyframe_not_clipped_to_core_range_end(self):
+        # The last detection sits at rel 203 (3 frames into the tail of a
+        # clip with core length 200 and 6-frame tail). Its Width keyframe
+        # SHALL land at comp_for_rel(203) with the detection's own width,
+        # not clipped to the core-range end (frame 199 or similar).
+        detections = _make_detections({
+            100: {"x": 0.40, "y": 0.45, "w": 0.10, "h": 0.05},
+            203: {"x": 0.40, "y": 0.45, "w": 0.10, "h": 0.05},
+        })
+        script = _generate_lua_script_for_clip(
+            "clipA", detections, frame_count=206,
+            src_start_frame=1000,
+        )
+        width_lines = _find_keyframe_lines(script, "Width")
+        widths = {
+            _parse_keyframe_frame(ln): _parse_scalar_rhs(ln)
+            for ln in width_lines
+        }
+        # The detection-frame keyframe itself SHALL exist at rel=203 with the
+        # detection's width (0.10), proving no clipping to the core end.
+        assert widths.get(203) == 0.10, widths
+
+    def test_post_boundary_zero_kf_emitted_only_when_tail_has_slack(self):
+        # When a detection sits in the tail but there is still slack at the
+        # comp's end (last densified frame < frame_count - 1), the Fusion
+        # generator SHALL emit the post-boundary zero-size keyframe at
+        # last_kf_frame + 1. With detections at rel 100 and 150 in a
+        # frame_count=206 (core 200 + tail 6) comp, last_kf_frame from
+        # nearest-neighbour fill is 152, so the zero post-boundary lands
+        # at 153.
+        detections = _make_detections({
+            100: {"x": 0.40, "y": 0.45, "w": 0.10, "h": 0.05},
+            150: {"x": 0.40, "y": 0.45, "w": 0.10, "h": 0.05},
+        })
+        script = _generate_lua_script_for_clip(
+            "clipA", detections, frame_count=206,
+            src_start_frame=1000,
+        )
+        width_lines = _find_keyframe_lines(script, "Width")
+        widths = {
+            _parse_keyframe_frame(ln): _parse_scalar_rhs(ln)
+            for ln in width_lines
+        }
+        # last_kf_frame = 152 (nearest of 150 within _NEAREST_WINDOW=2) so
+        # the post-boundary zero keyframe lands at 153 (still inside the
+        # widened frame_count).
+        assert widths.get(153) == 0, widths
+
+
+# ---------------------------------------------------------------------------
 # Diagnostics still emitted
 # ---------------------------------------------------------------------------
 

@@ -8,7 +8,7 @@ from rich.console import Console
 
 from trailvideocut.config import TrailVideoCutConfig, TransitionStyle
 from trailvideocut.editor.keyframes import probe_video_params
-from trailvideocut.editor.models import CutPlan
+from trailvideocut.editor.models import CutPlan, tail_frames
 from trailvideocut.plate.models import ClipPlateData
 
 console = Console()
@@ -73,9 +73,16 @@ class DaVinciExporter:
                 # dict key / range bound.
                 src_start_frame = int(_seconds_to_rational_time(d.source_start, fps).value)
                 src_end_frame = int(_seconds_to_rational_time(d.source_end, fps).value)
-                clip_dets = _build_clip_detections(cpd, src_start_frame, src_end_frame)
+                tail = tail_frames(i, plan, fps)
+                clip_dets = _build_clip_detections(
+                    cpd, src_start_frame, src_end_frame, tail=tail,
+                )
                 if clip_dets:
-                    frame_count = src_end_frame - src_start_frame
+                    # Include the tail in the Fusion frame_count so the comp
+                    # covers the full source range the exporter will emit
+                    # (core + tail). The last detection may sit inside the
+                    # tail — see spec `Fusion blur composition structure`.
+                    frame_count = src_end_frame - src_start_frame + tail
                     plate_clips.append((
                         f"segment_{i + 1:03d}",
                         clip_dets,
@@ -142,20 +149,26 @@ def _build_clip_detections(
     cpd: ClipPlateData,
     src_start_frame: int,
     src_end_frame: int,
+    tail: int = 0,
 ) -> dict[str, list[dict]]:
     """Filter and re-key a clip's plate detections into the Fusion/OTIO dict form.
 
     Keeps only detections whose absolute source-video frame number falls in
-    the half-open interval ``[src_start_frame, src_end_frame)``, shifts the
-    frame numbers to clip-relative (``frame_num - src_start_frame``), and
+    the half-open interval ``[src_start_frame, src_end_frame + tail)``, shifts
+    the frame numbers to clip-relative (``frame_num - src_start_frame``), and
     casts all numeric fields to ``float`` so the result is JSON-serialisable.
+
+    ``tail`` is zero by default (legacy behaviour); callers that want to
+    include a clip's transition tail pass the frame count returned by
+    :func:`trailvideocut.editor.models.tail_frames`.
 
     Used by both the Fusion Lua generator and the OTIO metadata embedding
     so the two payloads cannot drift.
     """
+    upper_exclusive = src_end_frame + tail
     result: dict[str, list[dict]] = {}
     for frame_num, boxes in cpd.detections.items():
-        if not (src_start_frame <= frame_num < src_end_frame):
+        if not (src_start_frame <= frame_num < upper_exclusive):
             continue
         rel = frame_num - src_start_frame
         result[str(rel)] = [
@@ -258,7 +271,10 @@ def _generate_otio_timeline(
                 # agree.
                 src_start_frame = int(_seconds_to_rational_time(d.source_start, fps).value)
                 src_end_frame = int(_seconds_to_rational_time(d.source_end, fps).value)
-                clip_detections = _build_clip_detections(cpd, src_start_frame, src_end_frame)
+                tail = tail_frames(clip_index, plan, fps)
+                clip_detections = _build_clip_detections(
+                    cpd, src_start_frame, src_end_frame, tail=tail,
+                )
                 if clip_detections:
                     clip.metadata["trailvideocut"] = {
                         "plates": {

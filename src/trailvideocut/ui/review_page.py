@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from trailvideocut.audio.models import AudioAnalysis, MusicSection
-from trailvideocut.editor.models import CutPlan, EditDecision
+from trailvideocut.editor.models import CutPlan, EditDecision, clip_frame_window
 from trailvideocut.plate.models import ClipPlateData, PlateBox
 from trailvideocut.plate.projection import project_manual_box
 from trailvideocut.plate.storage import delete_plates, load_plates, save_plates
@@ -64,6 +64,11 @@ class ReviewPage(QWidget):
         self._preview_target_starts: list[float] = []
         self._music_player: QMediaPlayer | None = None
         self._music_audio_output: QAudioOutput | None = None
+
+        # Current cut plan (set in set_data). Needed by tail-frame helpers so
+        # the effective clip window can be computed without plumbing fps and
+        # transition state through every call site.
+        self._cut_plan: CutPlan | None = None
 
         # Plate detection state
         self._plate_data: dict[int, ClipPlateData] = {}  # clip_index -> ClipPlateData
@@ -426,6 +431,7 @@ class ReviewPage(QWidget):
         self._sections = audio.sections
         self._audio_path = audio_path
         self._video_path = video_path
+        self._cut_plan = cut_plan
 
         # Enable preview button when audio is available
         self._btn_preview.setEnabled(bool(audio_path))
@@ -445,6 +451,8 @@ class ReviewPage(QWidget):
 
         # Timeline
         self._timeline.set_data(cut_plan.decisions, video_duration)
+        # Pass transition metadata so the timeline can paint the tail band.
+        self._timeline.set_transition_info(cut_plan, self._player.fps)
 
         # Marks on timeline and player
         if marks:
@@ -788,11 +796,30 @@ class ReviewPage(QWidget):
         """Update the Selected Clip panel for clip at index."""
         if index < 0 or index >= len(self._timeline.clips):
             self._clip_info_label.setText("")
+            self._clip_info_label.setToolTip("")
             return
 
         clip = self._timeline.clips[index]
         duration = clip.source_end - clip.source_start
         target_dur = clip.target_end - clip.target_start
+
+        # Transition-tail badge: derived from the cut plan's crossfade.
+        tail = 0
+        plan = self._cut_plan
+        if plan is not None:
+            from trailvideocut.editor.models import tail_frames as _tail_frames
+            tail = _tail_frames(index, plan, self._player.fps)
+        tail_suffix = f"  + {tail} tail frames" if tail > 0 else ""
+
+        # In-tail indicator: if the playhead is inside this clip's tail,
+        # show `tail K/N` so the user knows how far into the tail they are.
+        in_tail_text = ""
+        if tail > 0:
+            current_frame = self._player.frame_at(self._player.current_time)
+            core_end_frame = round(clip.source_end * self._player.fps)
+            pos_in_tail = current_frame - core_end_frame + 1
+            if 1 <= pos_in_tail <= tail:
+                in_tail_text = f"  tail {pos_in_tail}/{tail}"
 
         # Find section
         section_label = "unknown"
@@ -817,14 +844,35 @@ class ReviewPage(QWidget):
             if manual_boxes:
                 plate_info += f" ({manual_boxes}m)"
 
+        # Orphan-plate warning: plates stored outside the current effective
+        # window (e.g. after shrinking crossfade_duration). Surface the
+        # count in-line and the exact frames in the tooltip.
+        orphan_suffix = ""
+        orphans = self._orphan_tail_plates_by_clip().get(index, [])
+        if orphans:
+            orphan_suffix = f"  ⚠ {len(orphans)} out-of-window plate(s)"
+
         self._clip_info_label.setText(
             f"Clip {index + 1}/{len(self._timeline.clips)}"
             f"  Score: {clip.interest_score:.3f}"
             f"  Section: {section_label} ({section_energy:.2f})"
             f"{plate_info}"
             f"  Src: {clip.source_start:.2f}-{clip.source_end:.2f}s ({duration:.2f}s)"
+            f"{tail_suffix}"
+            f"{in_tail_text}"
+            f"{orphan_suffix}"
             f"  Tgt: {clip.target_start:.2f}-{clip.target_end:.2f}s ({target_dur:.2f}s)"
         )
+        # Tooltip carries the in-tail indicator and the orphan frame list
+        # so hover surfaces actionable detail even when the label is truncated.
+        tip_parts: list[str] = []
+        if in_tail_text:
+            tip_parts.append(in_tail_text.strip())
+        if orphans:
+            tip_parts.append(
+                f"Out-of-window plate frames: {', '.join(str(f) for f in orphans)}",
+            )
+        self._clip_info_label.setToolTip("\n".join(tip_parts))
 
     def _on_clip_selected(self, index: int):
         if self._previewing:
@@ -1219,23 +1267,87 @@ class ReviewPage(QWidget):
             if self._chk_show_phone_filter.isChecked():
                 self._push_phone_zones_for_current_frame()
 
-    def _sync_overlay_to_current_clip(self):
-        """Set the overlay's clip data based on the currently selected/active clip."""
-        self._ensure_video_dims()
-        clip_data = None
+    def _orphan_tail_plates_by_clip(self) -> dict[int, list[int]]:
+        """Return per-clip lists of stored plate frames outside the effective window.
 
+        Used to surface a warning when the user shrinks ``crossfade_duration``
+        after placing plates in a clip's tail, so they can be fixed or
+        deleted instead of silently dropped at export time.
+        """
+        plan = self._cut_plan
+        if plan is None:
+            return {}
+        fps = self._player.fps
+        orphans: dict[int, list[int]] = {}
+        for idx, cpd in self._plate_data.items():
+            if not (0 <= idx < len(plan.decisions)):
+                continue
+            start, end_excl = clip_frame_window(idx, plan, fps)
+            out_of_window = sorted(
+                f for f in cpd.detections.keys()
+                if not (start <= f < end_excl)
+            )
+            orphans[idx] = out_of_window
+        return orphans
+
+    def _clip_window(self, clip_index: int) -> tuple[int, int] | None:
+        """Effective source-frame window of clip *clip_index* (core + tail).
+
+        Returns ``None`` when the cut plan is not yet set or the index is
+        out of range. See :func:`trailvideocut.editor.models.clip_frame_window`.
+        """
+        plan = self._cut_plan
+        if plan is None:
+            return None
+        if not (0 <= clip_index < len(plan.decisions)):
+            return None
+        return clip_frame_window(clip_index, plan, self._player.fps)
+
+    def _owning_clip_for_frame(self, frame_num: int) -> int:
+        """Return the clip index whose effective window contains ``frame_num``.
+
+        Preference order (per plate-clip-transition-tail spec):
+          1. Selected clip, if the frame lies in its effective window.
+          2. First clip whose effective window contains the frame.
+          3. ``-1`` when no clip claims the frame.
+        """
         selected = self._timeline.selected_index
-        if selected >= 0 and selected in self._plate_data:
+        window = self._clip_window(selected)
+        if window is not None and window[0] <= frame_num < window[1]:
+            return selected
+        plan = self._cut_plan
+        if plan is not None:
+            for i in range(len(plan.decisions)):
+                s, e = clip_frame_window(i, plan, self._player.fps)
+                if s <= frame_num < e:
+                    return i
+        return -1
+
+    def _sync_overlay_to_current_clip(self):
+        """Set the overlay's clip data based on the currently selected/active clip.
+
+        Binding preference (plate-clip-transition-tail):
+          1. If the playhead lies in the selected clip's effective window
+             (core range ∪ transition tail), bind to the selected clip —
+             even when its `ClipPlateData` is empty, so Add Plate in the
+             tail attributes to the selected clip.
+          2. Otherwise fall back to the first clip whose effective window
+             contains the frame.
+          3. If no clip contains the frame but the selected clip has plate
+             data, keep showing it (preserves the "selection sticks when
+             the playhead roams" UX for gaps between clips).
+        """
+        self._ensure_video_dims()
+        clip_data: ClipPlateData | None = None
+
+        current_frame = self._player.frame_at(self._player.current_time)
+        owning = self._owning_clip_for_frame(current_frame)
+        selected = self._timeline.selected_index
+
+        if owning >= 0:
+            clip_data = self._plate_data.get(owning)
+        elif selected >= 0 and selected in self._plate_data:
             clip_data = self._plate_data[selected]
-        else:
-            # Find clip for current video position
-            current_time = self._player.current_time
-            clips = self._timeline.clips
-            for i, clip in enumerate(clips):
-                if clip.source_start <= current_time <= clip.source_end:
-                    if i in self._plate_data:
-                        clip_data = self._plate_data[i]
-                    break
 
         self._plate_overlay.set_clip_data(clip_data)
 
@@ -2021,7 +2133,11 @@ class ReviewPage(QWidget):
         # Refine Clip Plates: mirrors Clear Clip Plates enablement.
         self._btn_refine_clip_plates.setEnabled(clip_has_plates and not detecting)
 
-        # Clear Frame Plates: needs current frame with plates
+        # Clear Frame Plates: needs current frame with plates on the selected
+        # clip. The "selected clip" includes its transition tail — a plate
+        # stored at `detections[frame_num]` counts regardless of whether
+        # `frame_num` sits in the core range or the tail, because the
+        # detections dict is keyed by absolute source-frame.
         frame_has_plates = False
         if clip_has_plates:
             frame_num = self._player.frame_at(self._player.current_time)

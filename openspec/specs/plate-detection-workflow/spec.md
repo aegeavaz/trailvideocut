@@ -1,5 +1,7 @@
-## ADDED Requirements
+## Purpose
 
+Run plate detection from the Review page — either on the selected clip, on all clips, or on a single frame — while keeping the UI responsive via a background worker, preserving manual boxes across re-runs, and sharing a cached detector instance.
+## Requirements
 ### Requirement: Detect Plates button on Review page
 The Review page SHALL display a "Detect Plates" button that triggers plate detection. The button SHALL be enabled only after analysis is complete (clips are available).
 
@@ -12,15 +14,19 @@ The Review page SHALL display a "Detect Plates" button that triggers plate detec
 - **THEN** the "Detect Plates" button SHALL be disabled
 
 ### Requirement: Scope detection to selected clip or all clips
-When a clip is selected in the timeline, plate detection SHALL run only on that clip's source time range. When no clip is selected, detection SHALL run on all clips.
+When a clip is selected in the timeline, clip-wide plate detection SHALL run only on that clip's core source time range `[source_start, source_end)`. Clip-wide detection SHALL NOT extend into the transition tail, because the tail is reserved for user-driven single-frame detection and manual plate placement to keep automatic-scan time predictable. When no clip is selected, clip-wide detection SHALL run on all clips' core ranges. Single-frame detection (the "Detect Frame" button) SHALL be permitted on any frame in the selected clip's effective window (core range ∪ tail).
 
 #### Scenario: Detection with clip selected
 - **WHEN** the user selects clip #3 in the timeline and clicks "Detect Plates"
-- **THEN** detection SHALL run only on the source time range of clip #3
+- **THEN** clip-wide detection SHALL run only on the source time range `[source_start, source_end)` of clip #3 and SHALL NOT scan the tail
 
 #### Scenario: Detection with no clip selected
 - **WHEN** no clip is selected and the user clicks "Detect Plates"
-- **THEN** detection SHALL run on all clips in sequence
+- **THEN** clip-wide detection SHALL run on all clips' core ranges in sequence; tail frames SHALL NOT be automatically scanned
+
+#### Scenario: Detect Frame at a tail frame
+- **WHEN** the selected clip has a transition tail and the playhead is inside that tail
+- **THEN** clicking "Detect Frame" SHALL scan that single tail frame and store any detections on the selected clip
 
 ### Requirement: Background detection with progress
 Plate detection SHALL run in a background thread (PlateDetectionWorker) and display a progress bar on the Review page. The UI SHALL remain responsive during detection.
@@ -74,7 +80,7 @@ The plate detection workflow SHALL support a single-frame detection mode that re
 - **THEN** the system creates a new PlateDetector with updated settings, replacing the cached instance
 
 ### Requirement: Frame extraction for single-frame detection
-The system SHALL extract the current frame from the video using OpenCV, matching the frame number computed from the player's current time and FPS. The extracted frame SHALL be passed to the detector's tiled detection method.
+The system SHALL extract the current frame from the video using OpenCV, matching the frame number computed from the player's current time and FPS. The extracted frame SHALL be passed to the detector's tiled detection method. Single-frame detection SHALL be allowed at any source-video frame that belongs to the selected clip's effective window — that is, `[source_start_frame, source_end_frame + tail_frames(clip_index, plan, fps))` as defined by the `plate-clip-transition-tail` capability. When detection at a tail frame returns bounding boxes, the results SHALL be stored under the selected clip's `ClipPlateData.detections[frame]` at the absolute source-video frame key, with no shift or re-assignment to an adjacent clip.
 
 #### Scenario: Frame extraction matches player position
 - **WHEN** single-frame detection is triggered
@@ -83,6 +89,10 @@ The system SHALL extract the current frame from the video using OpenCV, matching
 #### Scenario: Frame extraction failure
 - **WHEN** the video frame cannot be read (seek failure, corrupted file)
 - **THEN** the system displays an error message and does not modify plate data
+
+#### Scenario: Single-frame detection at a tail frame stores under the selected clip
+- **WHEN** the selected clip's core ends at source frame 120 with a 6-frame tail, the user is on source frame 123, and Detect Frame finds a plate
+- **THEN** the detection SHALL be stored at `clip[selected].detections[123]` with no offset applied, and the overlay SHALL render it as part of the selected clip
 
 ### Requirement: Overlay visibility toggle
 The Review page SHALL provide a checkbox or toggle button to show/hide the plate overlay. This allows the user to view the clean video without boxes when needed.
@@ -94,3 +104,4 @@ The Review page SHALL provide a checkbox or toggle button to show/hide the plate
 #### Scenario: Toggle overlay on
 - **WHEN** the user checks the "Show Plates" toggle
 - **THEN** plate bounding boxes SHALL be displayed again on the current frame
+

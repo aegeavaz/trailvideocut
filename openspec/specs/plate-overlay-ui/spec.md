@@ -66,7 +66,7 @@ The system SHALL allow the user to delete a selected bounding box by pressing th
 - **THEN** all plates on the current frame SHALL be cleared (equivalent to "Clear Frame Plates" button)
 
 ### Requirement: Add a manual plate box
-The system SHALL allow the user to add a new bounding box on the current frame. When two or more recent reference detections are available, the new box's position SHALL be computed by projecting the motion of those detections onto the current frame. When fewer than two reference detections are usable, the system SHALL fall back in order: clone the single nearest detection, then place at the mouse cursor position with a default size, then place at the frame center with a default size. In all three detection-aware paths (motion projection, nearest-reference clone, and — if the nearest reference is used to size a cursor/centre placement) the new box's `angle` SHALL be inherited from the nearest reference detection used, so that new manual boxes match the surrounding rotation instead of snapping back to axis-aligned. Only the pure default-size fallback used when no reference detection exists at all SHALL produce `angle == 0.0`. The new box SHALL always be marked `manual: true`, SHALL be clamped to remain fully within the frame (using the axis-aligned envelope of the rotated rectangle), and the system SHALL auto-save all plate data to the sidecar file.
+The system SHALL allow the user to add a new bounding box on the current frame. When two or more recent reference detections are available, the new box's position SHALL be computed by projecting the motion of those detections onto the current frame. When fewer than two reference detections are usable, the system SHALL fall back in order: clone the single nearest detection, then place at the mouse cursor position with a default size, then place at the frame center with a default size. In all three detection-aware paths (motion projection, nearest-reference clone, and — if the nearest reference is used to size a cursor/centre placement) the new box's `angle` SHALL be inherited from the nearest reference detection used, so that new manual boxes match the surrounding rotation instead of snapping back to axis-aligned. Only the pure default-size fallback used when no reference detection exists at all SHALL produce `angle == 0.0`. The new box SHALL always be marked `manual: true`, SHALL be clamped to remain fully within the frame (using the axis-aligned envelope of the rotated rectangle), and the system SHALL auto-save all plate data to the sidecar file. When the current frame lies in the selected clip's transition tail (as defined by the `plate-clip-transition-tail` capability), Add Plate SHALL still operate on the selected clip — the new box SHALL be stored under that clip's `ClipPlateData.detections[current_frame]` and projection SHALL consider that clip's full effective window (core range ∪ tail) when searching for reference detections.
 
 #### Scenario: Projection with two prior detections
 - **WHEN** the user triggers "Add plate box" at frame 60, frame 40 has a detected plate at normalized center (0.40, 0.50), and frame 50 has a detected plate at normalized center (0.45, 0.50)
@@ -107,6 +107,10 @@ The system SHALL allow the user to add a new bounding box on the current frame. 
 #### Scenario: Added box is immediately editable
 - **WHEN** a manual box is added
 - **THEN** the new box SHALL be automatically selected, ready for move/resize
+
+#### Scenario: Add in the selected clip's transition tail uses a core-range reference
+- **WHEN** clip 0's core range ends at frame 120 with a 6-frame tail, `detections[118]` holds a plate with `angle = 10°`, and the user clicks Add Plate at frame 123 (tail position 3/6)
+- **THEN** a new box SHALL be cloned from the frame-118 reference, stored at clip 0's `detections[123]`, with `angle = 10°`, marked as `manual: true`
 
 ### Requirement: Display plate data persistence status
 The system SHALL display a visual indicator in the plate controls area showing whether saved plate data was loaded from disk for the current video.
@@ -194,7 +198,7 @@ Dragging the rotation handle SHALL update the box's `angle` such that the handle
 - **THEN** the saved box's `angle` SHALL reflect the new orientation (±1° tolerance) and its `(w, h, centre)` SHALL equal the pre-drag values
 
 ### Requirement: Button state updates on navigation
-The system SHALL update the enabled/disabled state of the action buttons (Detect Frame, Clear Clip Plates, Clear Frame Plates, Refine Clip Plates, Refine Frame Plates, Preview Blur) when the user navigates between clips or seeks to a different frame position, **and whenever the plate set of the current clip or frame changes through any overlay-driven edit** — including adding, moving, resizing, rotating, or deleting a plate box. Refresh of the enablement state SHALL NOT depend on the user leaving and re-entering the current frame; adding the very first plate on a clip or frame SHALL immediately activate the Refine Clip Plates, Refine Frame Plates, Clear Clip Plates, and Clear Frame Plates buttons.
+The system SHALL update the enabled/disabled state of the action buttons (Detect Frame, Clear Clip Plates, Clear Frame Plates, Refine Clip Plates, Refine Frame Plates, Preview Blur) when the user navigates between clips or seeks to a different frame position, **and whenever the plate set of the current clip or frame changes through any overlay-driven edit** — including adding, moving, resizing, rotating, or deleting a plate box. Refresh of the enablement state SHALL NOT depend on the user leaving and re-entering the current frame; adding the very first plate on a clip or frame SHALL immediately activate the Refine Clip Plates, Refine Frame Plates, Clear Clip Plates, and Clear Frame Plates buttons. For the purposes of the "current frame belongs to the selected clip" check used by Clear Frame Plates, Refine Frame Plates, and Preview Blur, the clip's frame set SHALL be the effective window `clip_frame_window(selected_index, plan, fps)` defined by the `plate-clip-transition-tail` capability — i.e. it SHALL include the clip's transition tail when one applies.
 
 #### Scenario: User navigates to clip with plate data
 - **WHEN** the user selects a clip that has plate data
@@ -215,6 +219,14 @@ The system SHALL update the enabled/disabled state of the action buttons (Detect
 #### Scenario: Deleting the last plate on a frame
 - **WHEN** the current frame has one plate and the user deletes it (via canvas or chip)
 - **THEN** "Refine Frame Plates" and "Clear Frame Plates" SHALL become disabled immediately while "Refine Clip Plates" and "Clear Clip Plates" remain enabled as long as other frames in the clip still have plates
+
+#### Scenario: Playhead in the selected clip's transition tail keeps frame-scoped buttons available
+- **WHEN** the selected clip's tail is 6 frames and the playhead is at the 4th tail frame with a plate at that source-frame index in the clip's `detections`
+- **THEN** "Clear Frame Plates" and "Refine Frame Plates" SHALL be enabled, and "Detect Frame" SHALL be enabled, exactly as if the playhead were inside the clip's core range
+
+#### Scenario: Playhead past the tail falls through to the next clip
+- **WHEN** the playhead is past the selected clip's effective window and inside the next clip's core range
+- **THEN** the buttons SHALL reflect the next clip's plate state (not the selected clip's), the overlay SHALL bind to the next clip's data, and the timeline selection SHALL remain on the originally selected clip
 
 ### Requirement: Delete/Backspace keyboard shortcut dual behavior
 The Delete and Backspace keys SHALL delete the currently selected plate box if one is selected. If no plate box is selected, the keys SHALL clear all plates on the current frame (equivalent to the "Clear Frame Plates" button).

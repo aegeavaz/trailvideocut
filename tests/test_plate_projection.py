@@ -223,6 +223,48 @@ class TestProjectManualBoxAngleInheritance:
         assert box.angle == pytest.approx(10.0)
 
 
+class TestProjectManualBoxTransitionTail:
+    """plate-clip-transition-tail: projection must work across the clip's
+    core/tail boundary. Projection is frame-agnostic, so these tests pin that
+    behaviour as a regression guard against future "restrict to core range"
+    refactors.
+    """
+
+    def test_target_in_tail_with_core_reference(self):
+        # Clip core ends at frame 120, tail is frames 120..125 inclusive.
+        # Manual add at frame 123 with the only reference at frame 118.
+        # Only one reference exists → projector returns None; the caller
+        # falls back to nearest-clone. The test below covers that path
+        # at the review-page integration level. Here we prove that adding
+        # a second reference from inside the core range yields projection.
+        detections = {
+            100: [PlateBox(x=0.40, y=0.50, w=0.10, h=0.05, angle=10.0)],
+            118: [PlateBox(x=0.49, y=0.50, w=0.10, h=0.05, angle=10.0)],
+        }
+        box = project_manual_box(detections, current_frame=123)
+        assert box is not None
+        cx, _ = _center(box)
+        # Velocity per-frame: (0.54 - 0.45)/(118-100) = 0.005; projected
+        # centre at frame 123: 0.54 + 5*0.005 = 0.565.
+        assert cx == pytest.approx(0.565, abs=1e-9)
+        assert box.angle == pytest.approx(10.0)
+
+    def test_target_in_core_with_only_tail_references(self):
+        # Only existing detections are inside the tail; projection still
+        # operates on absolute frame keys.
+        detections = {
+            122: [PlateBox(x=0.55, y=0.50, w=0.10, h=0.05, angle=8.0)],
+            124: [PlateBox(x=0.57, y=0.50, w=0.10, h=0.05, angle=8.0)],
+        }
+        box = project_manual_box(detections, current_frame=119)
+        assert box is not None
+        cx, _ = _center(box)
+        # Centres: 0.60 at 122, 0.62 at 124. Velocity +0.01/frame; at frame
+        # 119 (3 frames before 122) centre = 0.60 - 3*0.01 = 0.57.
+        assert cx == pytest.approx(0.57, abs=1e-9)
+        assert box.angle == pytest.approx(8.0)
+
+
 class TestProjectManualBoxNoQtImport:
     def test_module_has_no_qt_dependency(self):
         import sys
