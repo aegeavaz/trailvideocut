@@ -1,5 +1,6 @@
 """Tests for plate blur processing."""
 
+import cv2
 import numpy as np
 import pytest
 
@@ -214,6 +215,126 @@ class TestExpandBoxesForDrift:
 
         result = expand_boxes_for_drift({}, 10)
         assert result == []
+
+class TestOrientedBlurMask:
+    """Rotated-rectangle blur masks (refine-plate-box-fit, group 4)."""
+
+    def _solid_frame(self, h=200, w=400, val=200):
+        return np.full((h, w, 3), val, dtype=np.uint8)
+
+    def test_aabb_path_identical_to_legacy(self):
+        """angle == 0 must go through the legacy path pixel-identically."""
+        frame_a = self._solid_frame()
+        frame_b = frame_a.copy()
+        # Add a sharp feature so the blur effect is measurable.
+        frame_a[60:80, 120:200] = 20
+        frame_b[60:80, 120:200] = 20
+
+        box = PlateBox(x=0.25, y=0.25, w=0.3, h=0.2, angle=0.0)
+        apply_blur_to_frame(frame_a, [box])
+
+        # Explicitly-legacy box (no angle field) must match.
+        legacy_box = PlateBox(x=0.25, y=0.25, w=0.3, h=0.2)
+        apply_blur_to_frame(frame_b, [legacy_box])
+
+        np.testing.assert_array_equal(frame_a, frame_b)
+
+    def test_oriented_mask_blurs_inside_polygon_only(self):
+        """Pixels inside the rotated quadrilateral differ from source; pixels
+        inside the envelope but outside the polygon are untouched."""
+        h, w = 200, 400
+        frame = self._solid_frame(h, w, val=200)
+        # Put a checkerboard over the full envelope area so the blur has
+        # something to smooth regardless of which pixel we sample.
+        for y in range(h):
+            for x in range(w):
+                if (x // 3 + y // 3) % 2 == 0:
+                    frame[y, x] = (40, 40, 40)
+        original = frame.copy()
+
+        # Rotated square centred on (0.5, 0.5) at 30°.
+        box = PlateBox(x=0.4, y=0.4, w=0.2, h=0.2, angle=30.0)
+        apply_blur_to_frame(frame, [box])
+
+        # A pixel near the centre of the rotated polygon must have changed
+        # (checkerboard → blurred mid-grey).
+        centre = (100, 200)
+        assert not np.array_equal(frame[centre], original[centre])
+
+        # Pixels clearly outside the rotated polygon (≥2px clearance to
+        # tolerate integer-rasterisation of the polygon boundary) must not be
+        # touched. The envelope corners of a 30°-rotated box lie well outside
+        # the polygon so they are a reliable sample region.
+        changed = np.any(frame != original, axis=2)
+        corners_px = box.corners_px(w, h)
+        poly = np.array([[cx, cy] for cx, cy in corners_px], dtype=np.float32)
+        for y, x in zip(*np.where(changed)):
+            signed_dist = cv2.pointPolygonTest(
+                poly, (float(x), float(y)), measureDist=True,
+            )
+            assert signed_dist >= -1.5, (
+                f"pixel ({x},{y}) was blurred but lies {-signed_dist:.2f}px "
+                f"outside the rotated polygon"
+            )
+
+        # Envelope corners themselves are plenty-clear-of-polygon and must
+        # be untouched.
+        env_x, env_y, env_w, env_h = box.aabb_envelope()
+        ex = int(round(env_x * w))
+        ey = int(round(env_y * h))
+        assert np.array_equal(frame[ey + 1, ex + 1], original[ey + 1, ex + 1])
+
+    def test_oriented_kernel_uses_plate_aligned_dimensions(self):
+        """Kernel size is derived from the rotated rectangle's own (w, h)."""
+        from trailvideocut.plate.blur import _blur_kernel_size
+
+        # A 160x40 plate rotated 25° has envelope ~176x101, but the kernel
+        # must come from min(160, 40) == 40 → 41 (odd).
+        frame_w_px = 1000
+        frame_h_px = 1000
+        box = PlateBox(
+            x=(500 - 80) / frame_w_px, y=(500 - 20) / frame_h_px,
+            w=160 / frame_w_px, h=40 / frame_h_px, angle=25.0,
+        )
+        expected = _blur_kernel_size(
+            int(round(box.w * frame_w_px)), int(round(box.h * frame_h_px)),
+        )
+        assert expected == 41
+
+
+class TestDriftExpansionOriented:
+    def test_axis_aligned_path_unchanged(self):
+        from trailvideocut.plate.blur import expand_boxes_for_drift
+
+        detections = {
+            9: [PlateBox(x=0.50, y=0.30, w=0.02, h=0.02)],
+            10: [PlateBox(x=0.51, y=0.30, w=0.02, h=0.02)],
+            11: [PlateBox(x=0.52, y=0.30, w=0.02, h=0.02)],
+        }
+        result = expand_boxes_for_drift(detections, 10, margin_frames=1)
+        assert result[0].angle == 0.0
+        assert result[0].x == pytest.approx(0.50)
+        assert result[0].w == pytest.approx(0.04)
+
+    def test_oriented_participant_produces_oriented_union(self):
+        from trailvideocut.plate.blur import expand_boxes_for_drift
+
+        detections = {
+            9: [PlateBox(x=0.50, y=0.30, w=0.10, h=0.03, angle=10.0)],
+            10: [PlateBox(x=0.51, y=0.30, w=0.10, h=0.03, angle=10.0)],
+        }
+        result = expand_boxes_for_drift(detections, 10, margin_frames=1)
+        assert len(result) == 1
+        union = result[0]
+        assert abs(union.angle) > 0.0  # oriented union kept a rotation
+        # Union must cover both source polygons — every source corner lies
+        # inside the union envelope.
+        env_x, env_y, env_w, env_h = union.aabb_envelope()
+        for p in detections[9] + detections[10]:
+            for cx, cy in p.corners_px(1.0, 1.0):
+                assert env_x - 1e-6 <= cx <= env_x + env_w + 1e-6
+                assert env_y - 1e-6 <= cy <= env_y + env_h + 1e-6
+
 
 class TestCalibrateFrameOffset:
     """Tests for calibrate_frame_offset()."""

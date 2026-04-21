@@ -6,7 +6,6 @@ Verifies that zones recorded by the detector are carried on the emitted
 
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from trailvideocut.plate.models import ClipPlateData, PlateBox
 

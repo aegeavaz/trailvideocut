@@ -197,17 +197,17 @@ def _generate_lua_script_for_clip(
         blur_var = f"blur{ti + 1}"
         mask_var = f"mask{ti + 1}"
 
-        lines.append(f"")
+        lines.append("")
         lines.append(f"-- Plate track {ti + 1}")
         lines.append(f"local {mask_var} = comp:AddTool('RectangleMask', -32768, -32768)")
         lines.append(f"local {blur_var} = comp:AddTool('Blur', -32768, -32768)")
-        lines.append(f"")
+        lines.append("")
 
         # Connect blur input to previous output in the chain
         lines.append(f"{blur_var}:SetInput('Input', prev_output.Output)")
         # Connect mask to blur's effect mask
         lines.append(f"{blur_var}:SetInput('EffectMask', {mask_var}.Mask)")
-        lines.append(f"")
+        lines.append("")
 
         # Build a DENSE per-comp-frame keyframe list, one entry per frame in
         # [0, frame_count).  For frames where the track has no detection,
@@ -257,7 +257,7 @@ def _generate_lua_script_for_clip(
         # Assign animated splines to inputs then set keyframes.
         # Frame positions use comp_for_rel() which applies the piecewise
         # PTS-gap correction when needed.
-        lines.append(f"-- Animate mask center")
+        lines.append("-- Animate mask center")
         lines.append(f"{mask_var}.Center = XYPath({{}})")
         if first_kf_frame > 0:
             lines.append(f"{mask_var}.Center[comp_for_rel({first_kf_frame - 1})] = {{0.5, 0.5}}")
@@ -266,7 +266,7 @@ def _generate_lua_script_for_clip(
         if last_kf_frame + 1 < frame_count:
             lines.append(f"{mask_var}.Center[comp_for_rel({last_kf_frame + 1})] = {{0.5, 0.5}}")
 
-        lines.append(f"-- Animate mask width")
+        lines.append("-- Animate mask width")
         lines.append(f"{mask_var}.Width = BezierSpline({{}})")
         if first_kf_frame > 0:
             lines.append(f"{mask_var}.Width[comp_for_rel({first_kf_frame - 1})] = 0")
@@ -275,7 +275,7 @@ def _generate_lua_script_for_clip(
         if last_kf_frame + 1 < frame_count:
             lines.append(f"{mask_var}.Width[comp_for_rel({last_kf_frame + 1})] = 0")
 
-        lines.append(f"-- Animate mask height")
+        lines.append("-- Animate mask height")
         lines.append(f"{mask_var}.Height = BezierSpline({{}})")
         if first_kf_frame > 0:
             lines.append(f"{mask_var}.Height[comp_for_rel({first_kf_frame - 1})] = 0")
@@ -309,7 +309,7 @@ def _generate_lua_script_for_clip(
             )
 
         # Blur size: auto-scaled by relative plate area within the clip
-        lines.append(f"-- Animate blur size (auto-scaled by relative plate area)")
+        lines.append("-- Animate blur size (auto-scaled by relative plate area)")
         lines.append(f"{blur_var}.XBlurSize = BezierSpline({{}})")
         if first_kf_frame > 0:
             lines.append(f"{blur_var}.XBlurSize[comp_for_rel({first_kf_frame - 1})] = 0")

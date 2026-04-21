@@ -2,16 +2,27 @@
 
 from __future__ import annotations
 
+import math
 import sys
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QBrush, QColor, QCursor, QFont, QPainter, QPen, QPixmap
+from PySide6.QtGui import (
+    QBrush,
+    QColor,
+    QCursor,
+    QFont,
+    QPainter,
+    QPen,
+    QPixmap,
+    QPolygonF,
+)
 from PySide6.QtWidgets import QApplication, QWidget
 
 from trailvideocut.plate.models import ClipPlateData, PlateBox
 
 _HANDLE_SIZE = 8  # pixels
 _MIN_BOX_PX = 10  # minimum box dimension in pixels
+_ROTATE_HANDLE_OFFSET_PX = 18  # distance above top edge where the rotate handle sits
 
 
 class PlateOverlayWidget(QWidget):
@@ -55,9 +66,14 @@ class PlateOverlayWidget(QWidget):
         self._selected_idx: int = -1  # index into current frame's box list
         self._dragging: bool = False
         self._resizing: bool = False
-        self._resize_handle: str = ""  # e.g. "tl", "tr", "bl", "br", "t", "b", "l", "r"
+        self._rotating: bool = False
+        self._resize_handle: str = ""  # "tl","tr","bl","br","t","b","l","r","rotate"
         self._drag_start: QPointF = QPointF()
-        self._drag_box_start: tuple[float, float, float, float] = (0, 0, 0, 0)
+        # Drag-start snapshot: (centre_x, centre_y, w, h, angle) in norm coords.
+        self._drag_box_start: tuple[float, float, float, float, float] = (0, 0, 0, 0, 0)
+        # For the rotate handle: mouse angle (degrees) from box centre at
+        # drag start, so we can delta-rotate as the user drags.
+        self._rotate_start_mouse_angle: float = 0.0
         self._hiding_programmatically: bool = False
 
         # Blur preview tiles: list of (norm_rect, QPixmap)
@@ -382,7 +398,10 @@ class PlateOverlayWidget(QWidget):
         label_font.setPixelSize(10)
 
         for i, box in enumerate(boxes):
-            rect = self._norm_to_widget(box.x, box.y, box.w, box.h)
+            # The envelope rect drives handles and hit-tests for both the
+            # axis-aligned and the oriented cases.
+            env_x, env_y, env_w, env_h = box.aabb_envelope()
+            rect = self._norm_to_widget(env_x, env_y, env_w, env_h)
             selected = i == self._selected_idx
 
             # Fill (skip if blur tiles are shown — the pixmap replaces the fill)
@@ -400,36 +419,91 @@ class PlateOverlayWidget(QWidget):
             else:
                 pen = QPen(QColor(0, 150, 255), 2, Qt.SolidLine)
             painter.setPen(pen)
-            painter.drawRect(rect)
 
-            # Resize handles for selected box
+            if box.angle == 0.0:
+                painter.drawRect(rect)
+            else:
+                # Oriented outline: draw the rotated quadrilateral. Use the
+                # same video-rect mapping that _norm_to_widget uses.
+                vr = self._video_rect()
+                corners_norm = box.corners_px(1.0, 1.0)
+                poly = QPolygonF(
+                    [
+                        QPointF(
+                            vr.x() + nx * vr.width(),
+                            vr.y() + ny * vr.height(),
+                        )
+                        for nx, ny in corners_norm
+                    ]
+                )
+                painter.drawPolygon(poly)
+
+            # Resize + rotate handles for selected box — on the rotated rect.
             if selected:
-                self._draw_handles(painter, rect)
+                self._draw_handles(painter, box)
 
         painter.end()
 
-    def _draw_handles(self, painter: QPainter, rect: QRectF):
+    def _draw_handles(self, painter: QPainter, box: PlateBox):
         painter.setBrush(QBrush(QColor(255, 200, 0)))
         painter.setPen(QPen(QColor(80, 80, 80), 1))
         hs = _HANDLE_SIZE
         hh = hs / 2
 
-        positions = self._handle_positions(rect)
-        for pos in positions.values():
-            painter.drawRect(QRectF(pos.x() - hh, pos.y() - hh, hs, hs))
+        positions = self._handle_positions_for_box(box)
+        for name, pos in positions.items():
+            if name == "rotate":
+                # Rotation handle: circle, not square, and drawn with a short
+                # line connecting it to the top edge for affordance.
+                top = positions["t"]
+                painter.drawLine(top, pos)
+                painter.drawEllipse(pos, hh, hh)
+            else:
+                painter.drawRect(QRectF(pos.x() - hh, pos.y() - hh, hs, hs))
 
-    def _handle_positions(self, rect: QRectF) -> dict[str, QPointF]:
-        cx = rect.center().x()
-        cy = rect.center().y()
+    def _handle_positions_for_box(
+        self, box: PlateBox,
+    ) -> dict[str, QPointF]:
+        """Return handle positions on the (possibly rotated) plate-aligned
+        rectangle. For axis-aligned boxes (``angle == 0``) the positions
+        coincide with the AABB corners + edge midpoints.
+        """
+        vr = self._video_rect()
+        # ``corners_px`` returns the four corners of the plate-aligned
+        # rectangle in order TL, TR, BR, BL *before* rotation is applied —
+        # but the implementation already includes rotation.
+        corners = box.corners_px(vr.width(), vr.height())
+        tl = QPointF(vr.x() + corners[0][0], vr.y() + corners[0][1])
+        tr = QPointF(vr.x() + corners[1][0], vr.y() + corners[1][1])
+        br = QPointF(vr.x() + corners[2][0], vr.y() + corners[2][1])
+        bl = QPointF(vr.x() + corners[3][0], vr.y() + corners[3][1])
+
+        def _mid(a: QPointF, b: QPointF) -> QPointF:
+            return QPointF((a.x() + b.x()) / 2.0, (a.y() + b.y()) / 2.0)
+
+        t = _mid(tl, tr)
+        b_mid = _mid(bl, br)
+        left = _mid(tl, bl)
+        right = _mid(tr, br)
+        centre = _mid(tl, br)
+
+        # Rotation handle sits ``_ROTATE_HANDLE_OFFSET_PX`` away from the top
+        # edge along the box's local "up" direction.
+        up_x = t.x() - centre.x()
+        up_y = t.y() - centre.y()
+        up_len = math.hypot(up_x, up_y)
+        if up_len > 0:
+            rot = QPointF(
+                t.x() + up_x / up_len * _ROTATE_HANDLE_OFFSET_PX,
+                t.y() + up_y / up_len * _ROTATE_HANDLE_OFFSET_PX,
+            )
+        else:
+            rot = QPointF(t.x(), t.y() - _ROTATE_HANDLE_OFFSET_PX)
+
         return {
-            "tl": rect.topLeft(),
-            "tr": rect.topRight(),
-            "bl": rect.bottomLeft(),
-            "br": rect.bottomRight(),
-            "t": QPointF(cx, rect.top()),
-            "b": QPointF(cx, rect.bottom()),
-            "l": QPointF(rect.left(), cy),
-            "r": QPointF(rect.right(), cy),
+            "tl": tl, "tr": tr, "br": br, "bl": bl,
+            "t": t, "b": b_mid, "l": left, "r": right,
+            "rotate": rot,
         }
 
     def _forward_focus(self):
@@ -466,27 +540,43 @@ class PlateOverlayWidget(QWidget):
         pos = event.position()
         boxes = self._current_boxes()
 
-        # Check resize handles on selected box first
+        # Check resize/rotate handles on selected box first — handles live on
+        # the rotated plate-aligned rect.
         if 0 <= self._selected_idx < len(boxes):
             box = boxes[self._selected_idx]
-            rect = self._norm_to_widget(box.x, box.y, box.w, box.h)
-            handle = self._hit_handle(pos, rect)
+            handle = self._hit_handle(pos, box)
             if handle:
-                self._resizing = True
                 self._resize_handle = handle
                 self._drag_start = pos
-                self._drag_box_start = (box.x, box.y, box.w, box.h)
+                # Capture full rotation-preserving state at drag start:
+                # centre in normalized coords + plate-aligned (w, h, angle).
+                cx = box.x + box.w / 2.0
+                cy = box.y + box.h / 2.0
+                self._drag_box_start = (cx, cy, box.w, box.h, box.angle)
+                if handle == "rotate":
+                    self._rotating = True
+                    vr = self._video_rect()
+                    centre_widget_x = vr.x() + cx * vr.width()
+                    centre_widget_y = vr.y() + cy * vr.height()
+                    self._rotate_start_mouse_angle = math.degrees(math.atan2(
+                        pos.y() - centre_widget_y,
+                        pos.x() - centre_widget_x,
+                    ))
+                else:
+                    self._resizing = True
                 event.accept()
                 self._forward_focus()
                 return
 
-        # Hit test boxes (smallest area wins)
+        # Hit test boxes (smallest area wins) — test containment against the
+        # rotated rect so clicks near oriented corners hit the box.
         hit = -1
         hit_area = float("inf")
         for i, box in enumerate(boxes):
-            rect = self._norm_to_widget(box.x, box.y, box.w, box.h)
-            if rect.contains(pos):
-                area = rect.width() * rect.height()
+            if self._point_in_box(pos, box):
+                # Use plate-aligned area (not envelope) so tie-break picks the
+                # smallest actual box.
+                area = box.w * box.h
                 if area < hit_area:
                     hit = i
                     hit_area = area
@@ -497,7 +587,9 @@ class PlateOverlayWidget(QWidget):
             box = boxes[hit]
             self._dragging = True
             self._drag_start = pos
-            self._drag_box_start = (box.x, box.y, box.w, box.h)
+            cx = box.x + box.w / 2.0
+            cy = box.y + box.h / 2.0
+            self._drag_box_start = (cx, cy, box.w, box.h, box.angle)
             if old_idx != hit:
                 self.selection_changed.emit()
             self.update()
@@ -543,12 +635,35 @@ class PlateOverlayWidget(QWidget):
             dx = (pos.x() - self._drag_start.x()) / vr.width()
             dy = (pos.y() - self._drag_start.y()) / vr.height()
 
-            ox, oy, ow, oh = self._drag_box_start
-            new_x = max(0.0, min(1.0 - ow, ox + dx))
-            new_y = max(0.0, min(1.0 - oh, oy + dy))
+            # Move preserves rotation and plate-aligned dimensions; only the
+            # centre shifts.
+            ocx, ocy, ow, oh, oangle = self._drag_box_start
+            new_cx = ocx + dx
+            new_cy = ocy + dy
+            # Clamp so the AABB envelope stays inside the frame.
+            tmp = PlateBox(
+                x=new_cx - ow / 2, y=new_cy - oh / 2,
+                w=ow, h=oh, angle=oangle,
+            )
+            ex, ey, ew, eh = tmp.aabb_envelope()
+            if ex < 0:
+                new_cx -= ex
+            if ey < 0:
+                new_cy -= ey
+            if ex + ew > 1:
+                new_cx -= (ex + ew - 1)
+            if ey + eh > 1:
+                new_cy -= (ey + eh - 1)
 
-            box.x = new_x
-            box.y = new_y
+            box.x = new_cx - ow / 2
+            box.y = new_cy - oh / 2
+            box.w = ow
+            box.h = oh
+            box.angle = oangle
+            self.update()
+
+        elif self._rotating and 0 <= self._selected_idx < len(boxes):
+            self._apply_rotate(pos, boxes[self._selected_idx])
             self.update()
 
         elif self._resizing and 0 <= self._selected_idx < len(boxes):
@@ -574,10 +689,11 @@ class PlateOverlayWidget(QWidget):
                 self._panning = False
                 self._pan_started = False
                 self._deferred_deselect = False
-            elif self._dragging or self._resizing:
+            elif self._dragging or self._resizing or self._rotating:
                 self.box_changed.emit()
             self._dragging = False
             self._resizing = False
+            self._rotating = False
             self._resize_handle = ""
         super().mouseReleaseEvent(event)
 
@@ -587,79 +703,192 @@ class PlateOverlayWidget(QWidget):
         else:
             super().wheelEvent(event)
 
-    # --- Resize logic ---
+    # --- Hit testing / resize / rotate ---
 
-    def _hit_handle(self, pos: QPointF, rect: QRectF) -> str:
-        positions = self._handle_positions(rect)
+    def _hit_handle(self, pos: QPointF, box: PlateBox) -> str:
+        """Return the name of the handle under *pos* (``""`` if none)."""
+        positions = self._handle_positions_for_box(box)
+        best = ""
+        best_dist = float("inf")
         for name, hpos in positions.items():
-            if abs(pos.x() - hpos.x()) <= _HANDLE_SIZE and abs(pos.y() - hpos.y()) <= _HANDLE_SIZE:
-                return name
-        return ""
+            dx = pos.x() - hpos.x()
+            dy = pos.y() - hpos.y()
+            # Rotation handle is a circle, use radial test. Others use a
+            # generous square hit region.
+            if name == "rotate":
+                if math.hypot(dx, dy) <= _HANDLE_SIZE:
+                    dist = math.hypot(dx, dy)
+                    if dist < best_dist:
+                        best, best_dist = name, dist
+            else:
+                if abs(dx) <= _HANDLE_SIZE and abs(dy) <= _HANDLE_SIZE:
+                    dist = math.hypot(dx, dy)
+                    if dist < best_dist:
+                        best, best_dist = name, dist
+        return best
+
+    def _point_in_box(self, pos: QPointF, box: PlateBox) -> bool:
+        """Return True if the widget-coord point *pos* lies inside the
+        (possibly rotated) plate-aligned rectangle of *box*."""
+        vr = self._video_rect()
+        if vr.width() <= 0 or vr.height() <= 0:
+            return False
+        # Map pos into normalized video coordinates.
+        nx = (pos.x() - vr.x()) / vr.width()
+        ny = (pos.y() - vr.y()) / vr.height()
+        cx = box.x + box.w / 2.0
+        cy = box.y + box.h / 2.0
+        # Express the point in plate-aligned coords.
+        rad = math.radians(box.angle)
+        cos_a = math.cos(-rad)
+        sin_a = math.sin(-rad)
+        local_x = (nx - cx) * cos_a - (ny - cy) * sin_a
+        local_y = (nx - cx) * sin_a + (ny - cy) * cos_a
+        return abs(local_x) <= box.w / 2.0 and abs(local_y) <= box.h / 2.0
+
+    def _apply_rotate(self, pos: QPointF, box: PlateBox):
+        """Rotation-handle drag: rotate the box so the rotation handle
+        follows the mouse angle, anchored around the box centre."""
+        vr = self._video_rect()
+        ocx, ocy, ow, oh, oangle = self._drag_box_start
+        centre_widget_x = vr.x() + ocx * vr.width()
+        centre_widget_y = vr.y() + ocy * vr.height()
+        mouse_angle = math.degrees(math.atan2(
+            pos.y() - centre_widget_y,
+            pos.x() - centre_widget_x,
+        ))
+        delta = mouse_angle - self._rotate_start_mouse_angle
+        box.x = ocx - ow / 2
+        box.y = ocy - oh / 2
+        box.w = ow
+        box.h = oh
+        box.angle = oangle + delta
 
     def _apply_resize(self, pos: QPointF, box: PlateBox):
+        """Resize that preserves rotation. The handle's opposite reference
+        (corner or edge) stays fixed in widget coordinates; the new
+        plate-aligned ``(w, h)`` are computed by projecting the mouse offset
+        from that reference onto the box's local axes.
+        """
         vr = self._video_rect()
-        ox, oy, ow, oh = self._drag_box_start
-        dx = (pos.x() - self._drag_start.x()) / vr.width()
-        dy = (pos.y() - self._drag_start.y()) / vr.height()
+        ocx, ocy, ow, oh, oangle = self._drag_box_start
+        min_w_norm = _MIN_BOX_PX / max(1.0, vr.width())
+        min_h_norm = _MIN_BOX_PX / max(1.0, vr.height())
 
-        min_w = _MIN_BOX_PX / max(1, vr.width())
-        min_h = _MIN_BOX_PX / max(1, vr.height())
+        # Plate's local axes in normalized video coords.
+        rad = math.radians(oangle)
+        ux, uy = math.cos(rad), math.sin(rad)          # plate-horizontal
+        vx, vy = -math.sin(rad), math.cos(rad)          # plate-vertical
 
-        h = self._resize_handle
-        new_x, new_y, new_w, new_h = ox, oy, ow, oh
+        # Pos expressed in normalized video coords.
+        mouse_nx = (pos.x() - vr.x()) / vr.width()
+        mouse_ny = (pos.y() - vr.y()) / vr.height()
 
-        if "l" in h:
-            new_x = max(0.0, ox + dx)
-            new_w = max(min_w, ow - dx)
-            if ox + dx < 0:
-                new_x = 0.0
-                new_w = ox + ow
-        if "r" in h:
-            new_w = max(min_w, ow + dx)
-            if new_x + new_w > 1.0:
-                new_w = 1.0 - new_x
-        if "t" in h:
-            new_y = max(0.0, oy + dy)
-            new_h = max(min_h, oh - dy)
-            if oy + dy < 0:
-                new_y = 0.0
-                new_h = oy + oh
-        if "b" in h:
-            new_h = max(min_h, oh + dy)
-            if new_y + new_h > 1.0:
-                new_h = 1.0 - new_y
+        # The reference point of each handle in the original plate-aligned
+        # frame: offset from centre along (u, v) axes in plate units
+        # (x component in multiples of ow/2, y component in multiples of
+        # oh/2). "l" means the reference is the left edge mid-point (so we
+        # record (-1, 0)); "br" uses the top-left corner ("-1, -1"); etc.
+        ref_plate = {
+            "l":  (+1,  0),  # dragging "l" — left edge moves, right edge fixed
+            "r":  (-1,  0),
+            "t":  ( 0, +1),
+            "b":  ( 0, -1),
+            "tl": (+1, +1),
+            "tr": (-1, +1),
+            "bl": (+1, -1),
+            "br": (-1, -1),
+        }.get(self._resize_handle, (0, 0))
+        ref_u, ref_v = ref_plate
+
+        # Fixed reference point in normalized video coords.
+        ref_nx = ocx + ref_u * (ow / 2) * ux + ref_v * (oh / 2) * vx
+        ref_ny = ocy + ref_u * (ow / 2) * uy + ref_v * (oh / 2) * vy
+
+        # Vector from reference to mouse, in normalized coords.
+        rx = mouse_nx - ref_nx
+        ry = mouse_ny - ref_ny
+
+        # Project onto the plate's local axes.
+        proj_u = rx * ux + ry * uy     # plate-horizontal extent from ref
+        proj_v = rx * vx + ry * vy     # plate-vertical
+
+        # For each moving axis, the new plate dimension is |projection|.
+        # "l"/"r" handles only change width; "t"/"b" only change height;
+        # corners change both.
+        handle = self._resize_handle
+        new_w = ow
+        new_h = oh
+        if handle in ("l", "r", "tl", "tr", "bl", "br"):
+            new_w = max(min_w_norm, abs(proj_u))
+        if handle in ("t", "b", "tl", "tr", "bl", "br"):
+            new_h = max(min_h_norm, abs(proj_v))
+
+        # New centre: halfway from the fixed reference to the dragged point,
+        # in plate-aligned coords (so rotation is preserved).
+        # When width/height are clamped to their minima, fall back to the
+        # half-extent along that axis.
+        cu = (new_w / 2) * (1 if ref_u <= 0 else -1) if handle in (
+            "l", "r", "tl", "tr", "bl", "br"
+        ) else (ow / 2) * (1 if ref_u <= 0 else -1)
+        cv = (new_h / 2) * (1 if ref_v <= 0 else -1) if handle in (
+            "t", "b", "tl", "tr", "bl", "br"
+        ) else (oh / 2) * (1 if ref_v <= 0 else -1)
+        # For non-moving axes (e.g. edge handles), keep the original centre
+        # component so the opposite edge stays anchored.
+        if handle == "l" or handle == "r":
+            # Height axis unchanged; keep original centre on that axis.
+            cv = 0
+        if handle == "t" or handle == "b":
+            cu = 0
+
+        new_cx = ref_nx + cu * ux + cv * vx
+        new_cy = ref_ny + cu * uy + cv * vy
+
+        new_x = new_cx - new_w / 2
+        new_y = new_cy - new_h / 2
 
         box.x = new_x
         box.y = new_y
         box.w = new_w
         box.h = new_h
+        box.angle = oangle
 
     def _update_cursor(self, pos: QPointF):
         boxes = self._current_boxes()
         if 0 <= self._selected_idx < len(boxes):
             box = boxes[self._selected_idx]
-            rect = self._norm_to_widget(box.x, box.y, box.w, box.h)
-            handle = self._hit_handle(pos, rect)
-            if handle in ("tl", "br"):
-                self.setCursor(QCursor(Qt.SizeFDiagCursor))
+            handle = self._hit_handle(pos, box)
+            if handle == "rotate":
+                self.setCursor(QCursor(Qt.CrossCursor))
                 return
-            if handle in ("tr", "bl"):
-                self.setCursor(QCursor(Qt.SizeBDiagCursor))
+            # For oriented boxes the diagonal/vertical/horizontal cursors no
+            # longer map cleanly onto the widget axes, so use a single
+            # "size all" cursor for any handle hover when rotated. For
+            # angle == 0 we preserve the specific cursor per handle.
+            if box.angle == 0.0:
+                if handle in ("tl", "br"):
+                    self.setCursor(QCursor(Qt.SizeFDiagCursor))
+                    return
+                if handle in ("tr", "bl"):
+                    self.setCursor(QCursor(Qt.SizeBDiagCursor))
+                    return
+                if handle in ("t", "b"):
+                    self.setCursor(QCursor(Qt.SizeVerCursor))
+                    return
+                if handle in ("l", "r"):
+                    self.setCursor(QCursor(Qt.SizeHorCursor))
+                    return
+            elif handle:
+                self.setCursor(QCursor(Qt.SizeAllCursor))
                 return
-            if handle in ("t", "b"):
-                self.setCursor(QCursor(Qt.SizeVerCursor))
-                return
-            if handle in ("l", "r"):
-                self.setCursor(QCursor(Qt.SizeHorCursor))
-                return
-            if rect.contains(pos):
+            if self._point_in_box(pos, box):
                 self.setCursor(QCursor(Qt.SizeAllCursor))
                 return
 
-        # Check if hovering over any box
+        # Check if hovering over any box (rotation-aware).
         for box in boxes:
-            rect = self._norm_to_widget(box.x, box.y, box.w, box.h)
-            if rect.contains(pos):
+            if self._point_in_box(pos, box):
                 self.setCursor(QCursor(Qt.PointingHandCursor))
                 return
 

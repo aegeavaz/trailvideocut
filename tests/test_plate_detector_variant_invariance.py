@@ -17,7 +17,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from trailvideocut.plate.detector import PlateDetector
 from trailvideocut.plate.models import PlateBox

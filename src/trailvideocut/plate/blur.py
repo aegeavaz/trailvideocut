@@ -66,6 +66,16 @@ def calibrate_frame_offset(
     return best_offset
 
 
+def _box_corners_unit(box: PlateBox) -> np.ndarray:
+    """Return the four corners of *box* in normalized (0-1) coordinates.
+
+    For axis-aligned boxes the corners are the rectangle's corners; for
+    oriented boxes they are the rotated-rectangle corners.
+    """
+    corners = box.corners_px(1.0, 1.0)
+    return np.array(corners, dtype=np.float64)
+
+
 def expand_boxes_for_drift(
     detections: dict[int, list[PlateBox]],
     frame_num: int,
@@ -79,6 +89,11 @@ def expand_boxes_for_drift(
     frame timing drift — the expanded region covers the plate regardless of
     which adjacent frame the encoder/decoder actually shows.
 
+    If any source or matched-neighbour box is oriented (``angle != 0``),
+    the union is computed as the tightest oriented rectangle enclosing all
+    corner points (``cv2.minAreaRect`` over the corner cloud). Otherwise the
+    axis-aligned bounding box of the participants is returned unchanged.
+
     If *frame_num* has no detections, returns ``[]``.
     """
     boxes = detections.get(frame_num)
@@ -87,20 +102,16 @@ def expand_boxes_for_drift(
 
     result: list[PlateBox] = []
     for box in boxes:
-        # Start with current box bounds
-        x_min, y_min = box.x, box.y
-        x_max = box.x + box.w
-        y_max = box.y + box.h
+        participants: list[PlateBox] = [box]
 
         bcx = box.x + box.w / 2
         bcy = box.y + box.h / 2
 
-        # Expand to cover adjacent frames' positions
+        # Collect closest matching box from each adjacent frame.
         for offset in range(-margin_frames, margin_frames + 1):
             if offset == 0:
                 continue
             adj_boxes = detections.get(frame_num + offset, [])
-            # Find closest adjacent box by center distance
             best_dist = 0.1  # max match distance (normalized)
             best_adj = None
             for ab in adj_boxes:
@@ -111,19 +122,44 @@ def expand_boxes_for_drift(
                     best_dist = dist
                     best_adj = ab
             if best_adj is not None:
-                x_min = min(x_min, best_adj.x)
-                y_min = min(y_min, best_adj.y)
-                x_max = max(x_max, best_adj.x + best_adj.w)
-                y_max = max(y_max, best_adj.y + best_adj.h)
+                participants.append(best_adj)
 
-        result.append(PlateBox(
-            x=x_min,
-            y=y_min,
-            w=x_max - x_min,
-            h=y_max - y_min,
-            confidence=box.confidence,
-            manual=box.manual,
-        ))
+        any_oriented = any(p.angle != 0.0 for p in participants)
+
+        if not any_oriented:
+            # Legacy path — axis-aligned union, pixel-identical to v1 behaviour.
+            x_min = min(p.x for p in participants)
+            y_min = min(p.y for p in participants)
+            x_max = max(p.x + p.w for p in participants)
+            y_max = max(p.y + p.h for p in participants)
+            result.append(PlateBox(
+                x=x_min,
+                y=y_min,
+                w=x_max - x_min,
+                h=y_max - y_min,
+                confidence=box.confidence,
+                manual=box.manual,
+            ))
+        else:
+            # Oriented union — tightest rotated rect over all corners.
+            all_corners = np.vstack([_box_corners_unit(p) for p in participants])
+            (cx, cy), (w, h), angle = cv2.minAreaRect(
+                all_corners.astype(np.float32),
+            )
+            if w < h:
+                w, h = h, w
+                angle += 90.0
+            # Normalize angle into (-45, 45].
+            angle = ((angle + 45.0) % 90.0) - 45.0
+            result.append(PlateBox(
+                x=cx - w / 2.0,
+                y=cy - h / 2.0,
+                w=w,
+                h=h,
+                confidence=box.confidence,
+                manual=box.manual,
+                angle=angle,
+            ))
 
     return result
 
@@ -141,6 +177,68 @@ def _blur_kernel_size(plate_px_w: int, plate_px_h: int) -> int:
     return k
 
 
+def _apply_aabb_blur(
+    frame: np.ndarray, box: PlateBox, frame_h: int, frame_w: int,
+) -> None:
+    """Apply Gaussian blur to an axis-aligned box (in-place on *frame*).
+
+    Preserves the pre-refinement pixel behaviour exactly.
+    """
+    x1 = max(0, int(box.x * frame_w))
+    y1 = max(0, int(box.y * frame_h))
+    x2 = min(frame_w, int((box.x + box.w) * frame_w))
+    y2 = min(frame_h, int((box.y + box.h) * frame_h))
+
+    pw = x2 - x1
+    ph = y2 - y1
+    if pw < 2 or ph < 2:
+        return
+
+    k = _blur_kernel_size(pw, ph)
+    frame[y1:y2, x1:x2] = cv2.GaussianBlur(frame[y1:y2, x1:x2], (k, k), 0)
+
+
+def _apply_oriented_blur(
+    frame: np.ndarray, box: PlateBox, frame_h: int, frame_w: int,
+) -> None:
+    """Apply Gaussian blur to an oriented (rotated-rectangle) box in-place.
+
+    The blur is applied through a polygon mask so that pixels inside the
+    rotated quadrilateral are blurred while pixels inside the box's AABB
+    envelope but outside the quadrilateral stay untouched. Kernel size is
+    derived from the rotated rectangle's own ``(w, h)`` — *not* the envelope.
+    """
+    # Work inside the axis-aligned envelope to keep the cost localised.
+    env_x, env_y, env_w, env_h = box.aabb_envelope()
+    x1 = max(0, int(env_x * frame_w))
+    y1 = max(0, int(env_y * frame_h))
+    x2 = min(frame_w, int((env_x + env_w) * frame_w))
+    y2 = min(frame_h, int((env_y + env_h) * frame_h))
+    if x2 - x1 < 2 or y2 - y1 < 2:
+        return
+
+    # Kernel is derived from the plate-aligned (rotated) extents so the blur
+    # strength matches an equivalent axis-aligned plate of the same physical
+    # size.
+    plate_px_w = max(1, int(round(box.w * frame_w)))
+    plate_px_h = max(1, int(round(box.h * frame_h)))
+    k = _blur_kernel_size(plate_px_w, plate_px_h)
+
+    # Polygon corners in envelope-local pixel coordinates.
+    corners = box.corners_px(frame_w, frame_h)
+    local = np.array(
+        [[round(cx - x1), round(cy - y1)] for cx, cy in corners],
+        dtype=np.int32,
+    )
+
+    patch = frame[y1:y2, x1:x2]
+    blurred = cv2.GaussianBlur(patch, (k, k), 0)
+    mask = np.zeros(patch.shape[:2], dtype=np.uint8)
+    cv2.fillConvexPoly(mask, local, 255)
+    # Copy blurred pixels only where the mask covers the rotated rectangle.
+    np.copyto(patch, blurred, where=mask[..., None].astype(bool))
+
+
 def apply_blur_to_frame(
     frame: np.ndarray,
     boxes: list[PlateBox],
@@ -154,7 +252,9 @@ def apply_blur_to_frame(
     frame : np.ndarray
         BGR image (H, W, 3). Modified in-place and returned.
     boxes : list[PlateBox]
-        Plate boxes with normalized coordinates.
+        Plate boxes with normalized coordinates. Boxes with a non-zero
+        ``angle`` are blurred through a rotated-rectangle mask; boxes with
+        ``angle == 0`` go through the legacy axis-aligned path unchanged.
     frame_h, frame_w : int, optional
         Override frame dimensions (defaults to frame.shape).
 
@@ -169,22 +269,10 @@ def apply_blur_to_frame(
         frame_w = frame.shape[1]
 
     for box in boxes:
-        # Convert normalized coords to pixel coords, clamped to frame bounds
-        x1 = max(0, int(box.x * frame_w))
-        y1 = max(0, int(box.y * frame_h))
-        x2 = min(frame_w, int((box.x + box.w) * frame_w))
-        y2 = min(frame_h, int((box.y + box.h) * frame_h))
-
-        pw = x2 - x1
-        ph = y2 - y1
-        if pw < 2 or ph < 2:
-            continue
-
-        k = _blur_kernel_size(pw, ph)
-
-        frame[y1:y2, x1:x2] = cv2.GaussianBlur(
-            frame[y1:y2, x1:x2], (k, k), 0
-        )
+        if box.angle == 0.0:
+            _apply_aabb_blur(frame, box, frame_h, frame_w)
+        else:
+            _apply_oriented_blur(frame, box, frame_h, frame_w)
 
     return frame
 

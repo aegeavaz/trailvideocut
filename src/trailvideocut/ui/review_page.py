@@ -68,6 +68,8 @@ class ReviewPage(QWidget):
         # Plate detection state
         self._plate_data: dict[int, ClipPlateData] = {}  # clip_index -> ClipPlateData
         self._plate_worker = None
+        self._refine_worker = None
+        self._refine_progress = None
         self._video_dims: tuple[int, int] | None = None  # (width, height)
         self._plate_list_updating: bool = False  # guard against selection loops
         self._cached_detector = None  # lazily cached PlateDetector
@@ -186,6 +188,22 @@ class ReviewPage(QWidget):
         self._btn_add_plate.setToolTip("Add a manual plate box at the current frame")
         self._btn_add_plate.clicked.connect(self._on_add_plate)
         btn_row.addWidget(self._btn_add_plate)
+
+        self._btn_refine_clip_plates = QPushButton("Refine Clip Plates")
+        self._btn_refine_clip_plates.setEnabled(False)
+        self._btn_refine_clip_plates.setToolTip(
+            "Refine plate boxes in the selected clip with image analysis"
+        )
+        self._btn_refine_clip_plates.clicked.connect(self._on_refine_clip_plates)
+        btn_row.addWidget(self._btn_refine_clip_plates)
+
+        self._btn_refine_frame_plates = QPushButton("Refine Frame Plates")
+        self._btn_refine_frame_plates.setEnabled(False)
+        self._btn_refine_frame_plates.setToolTip(
+            "Refine plate boxes in the current frame with image analysis"
+        )
+        self._btn_refine_frame_plates.clicked.connect(self._on_refine_frame_plates)
+        btn_row.addWidget(self._btn_refine_frame_plates)
 
         self._btn_clear_clip_plates = QPushButton("Clear Clip Plates")
         self._btn_clear_clip_plates.setEnabled(False)
@@ -1027,6 +1045,8 @@ class ReviewPage(QWidget):
         self._btn_detect_frame.setEnabled(False)
         self._btn_clear_clip_plates.setEnabled(False)
         self._btn_clear_frame_plates.setEnabled(False)
+        self._btn_refine_clip_plates.setEnabled(False)
+        self._btn_refine_frame_plates.setEnabled(False)
 
         # Launch worker
         self._plate_worker = PlateDetectionWorker(
@@ -1536,6 +1556,8 @@ class ReviewPage(QWidget):
         self._btn_detect_frame.setEnabled(False)
         self._btn_clear_clip_plates.setEnabled(False)
         self._btn_clear_frame_plates.setEnabled(False)
+        self._btn_refine_clip_plates.setEnabled(False)
+        self._btn_refine_frame_plates.setEnabled(False)
         self._update_show_phone_filter_enabled()
         self._lbl_plate_status.setText("")
         self._refresh_plate_list()
@@ -1702,6 +1724,8 @@ class ReviewPage(QWidget):
             self._btn_detect_frame.setEnabled(False)
             self._btn_clear_clip_plates.setEnabled(False)
             self._btn_clear_frame_plates.setEnabled(False)
+            self._btn_refine_clip_plates.setEnabled(False)
+            self._btn_refine_frame_plates.setEnabled(False)
             self._update_show_phone_filter_enabled()
         else:
             self._save_plates()
@@ -1734,6 +1758,240 @@ class ReviewPage(QWidget):
         self._sync_overlay_to_current_clip()
         self._update_frame_buttons()
 
+    # --- Refinement flow ---
+
+    def _collect_refine_targets_clip(
+        self,
+    ) -> list[tuple[int, list[tuple[int, PlateBox]]]]:
+        selected = self._timeline.selected_index
+        if selected < 0 or selected not in self._plate_data:
+            return []
+        cpd = self._plate_data[selected]
+        out: list[tuple[int, list[tuple[int, PlateBox]]]] = []
+        for frame_no, boxes in cpd.detections.items():
+            if boxes:
+                out.append((frame_no, [(i, b) for i, b in enumerate(boxes)]))
+        return out
+
+    def _collect_refine_targets_frame(
+        self,
+    ) -> list[tuple[int, list[tuple[int, PlateBox]]]]:
+        selected = self._timeline.selected_index
+        if selected < 0 or selected not in self._plate_data:
+            return []
+        frame_num = self._player.frame_at(self._player.current_time)
+        boxes = self._plate_data[selected].detections.get(frame_num, [])
+        if not boxes:
+            return []
+        return [(frame_num, [(i, b) for i, b in enumerate(boxes)])]
+
+    def _on_refine_clip_plates(self):
+        targets = self._collect_refine_targets_clip()
+        if targets:
+            self._start_refine(targets)
+
+    def _on_refine_frame_plates(self):
+        targets = self._collect_refine_targets_frame()
+        if targets:
+            self._start_refine(targets)
+
+    def _start_refine(
+        self,
+        frames_and_boxes: list[tuple[int, list[tuple[int, PlateBox]]]],
+    ) -> None:
+        """Launch the refinement worker and show a progress dialog."""
+        from PySide6.QtWidgets import QProgressDialog
+
+        from trailvideocut.ui.workers import PlateRefineWorker
+
+        total_boxes = sum(len(p) for _, p in frames_and_boxes)
+        if total_boxes == 0 or not self._video_path:
+            return
+
+        self._refine_progress = QProgressDialog(
+            "Refining plate boxes...", "Cancel", 0, total_boxes, self,
+        )
+        self._refine_progress.setWindowModality(Qt.ApplicationModal)
+        self._refine_progress.setMinimumDuration(0)
+        self._refine_progress.setValue(0)
+
+        self._refine_worker = PlateRefineWorker(
+            video_path=self._video_path,
+            frames_and_boxes=frames_and_boxes,
+        )
+
+        def _on_progress(done: int, total: int) -> None:
+            self._refine_progress.setMaximum(total)
+            self._refine_progress.setValue(done)
+
+        def _defer_restore() -> None:
+            # Defer the overlay restore until after all pending dialog-close
+            # events have been processed — otherwise a late hideEvent from
+            # the QDialog / QProgressDialog can un-do the setVisible(True)
+            # we just issued.
+            QTimer.singleShot(0, self._restore_overlay_for_current_clip)
+
+        def _on_cancelled() -> None:
+            self._refine_progress.close()
+            self._refine_worker = None
+            _defer_restore()
+
+        def _on_error(msg: str) -> None:
+            self._refine_progress.close()
+            self._refine_worker = None
+            QMessageBox.warning(self, "Refinement failed", msg)
+            _defer_restore()
+
+        def _on_finished(results: list) -> None:
+            self._refine_worker = None
+            # Keep the progress dialog alive through the thumbnail pre-decode
+            # so the user sees the UI is still working, then close it once
+            # the review dialog is ready.
+            self._refine_progress.setLabelText("Preparing preview...")
+            QApplication.processEvents()
+            self._show_refine_review_dialog(results)
+            self._refine_progress.close()
+            _defer_restore()
+
+        self._refine_worker.progress.connect(_on_progress)
+        self._refine_worker.cancelled.connect(_on_cancelled)
+        self._refine_worker.error.connect(_on_error)
+        self._refine_worker.finished.connect(_on_finished)
+        self._refine_progress.canceled.connect(self._refine_worker.stop)
+        self._refine_worker.start()
+
+    def _show_refine_review_dialog(self, results: list) -> None:
+        """Open the Review Refinements dialog and persist accepted changes."""
+        from trailvideocut.ui.plate_refine_dialog import (
+            PlateRefineReviewDialog,
+            RefinementEntry,
+        )
+
+        if not results:
+            return
+
+        debug = self._chk_debug_plates.isChecked()
+        if debug:
+            for row in results:
+                frame_no, box_idx, _, _, confidence, method = row[:6]
+                details = row[6] if len(row) > 6 else {}
+                print(
+                    f"[PlateRefine] frame={frame_no} box={box_idx} "
+                    f"method={method} conf={confidence:.2f} details={details}",
+                )
+
+        # Skip entries the refiner couldn't improve — they carry
+        # ``method == "unchanged"`` and ``confidence == 0`` and have nothing
+        # for the user to accept.
+        entries = [
+            RefinementEntry(
+                frame_no=row[0], box_idx=row[1],
+                before=row[2], after=row[3],
+                confidence=row[4], method=row[5],
+            )
+            for row in results
+            if row[5] != "unchanged"
+        ]
+        # Keep the in-clip order stable so the user reviews earlier frames
+        # first; the thumbnail pre-decode below will also benefit from
+        # sequential VideoCapture seeks.
+        entries.sort(key=lambda e: (e.frame_no, e.box_idx))
+        if not entries:
+            # Everything came back "unchanged". Surface the per-frame
+            # diagnostic counts so the user can tell whether the filters are
+            # too strict for their footage (e.g. square motorbike plates).
+            total = len(results)
+            lines = [
+                "The refiner could not improve any of the selected plate "
+                "boxes.",
+                "",
+                f"Boxes processed: {total}",
+                "",
+                "Enable the 'Debug' checkbox in the plate settings row and "
+                "re-run to see per-box contour counts (contours_total, "
+                "rejected_area, rejected_aspect, rejected_centre, "
+                "best_aspect_seen, best_area_ratio_seen) printed to the "
+                "console.",
+            ]
+            QMessageBox.information(
+                self, "No refinements", "\n".join(lines),
+            )
+            return
+
+        import cv2
+        from PySide6.QtCore import QTimer
+        from PySide6.QtWidgets import QDialog
+
+        from trailvideocut.ui.plate_refine_dialog import _render_thumbnail
+
+        # Open the dialog IMMEDIATELY with placeholder thumbnails. Decoding
+        # runs asynchronously via a QTimer that fires during the dialog's
+        # own event loop, so each preview lights up as soon as its frame is
+        # decoded — no upfront wait.
+        dlg = PlateRefineReviewDialog(entries, parent=self)
+
+        # Sorted (row_index, entry) list for sequential-seek decoding.
+        queue: list[tuple[int, RefinementEntry]] = sorted(
+            list(enumerate(entries)), key=lambda p: p[1].frame_no,
+        )
+        cap = cv2.VideoCapture(self._video_path)
+        state = {"i": 0, "stopped": False}
+
+        def _stop_decoding() -> None:
+            state["stopped"] = True
+            if cap.isOpened():
+                cap.release()
+
+        # Stop the decoder if the user closes the dialog early.
+        dlg.finished.connect(lambda _r: _stop_decoding())
+
+        def _decode_one() -> None:
+            if state["stopped"] or state["i"] >= len(queue):
+                if not state["stopped"]:
+                    _stop_decoding()
+                return
+            row, entry = queue[state["i"]]
+            state["i"] += 1
+            cap.set(cv2.CAP_PROP_POS_FRAMES, entry.frame_no)
+            ret, frame = cap.read()
+            if ret:
+                dlg.set_thumbnail(
+                    row, _render_thumbnail(frame, entry.before, entry.after),
+                )
+            # Schedule the next frame on the next event-loop tick so the UI
+            # stays responsive between decodes.
+            QTimer.singleShot(0, _decode_one)
+
+        QTimer.singleShot(0, _decode_one)
+
+        if dlg.exec() != QDialog.Accepted:
+            _stop_decoding()
+            return
+        _stop_decoding()
+
+        accepted = dlg.accepted_entries
+        if not accepted:
+            return
+
+        selected = self._timeline.selected_index
+        if selected < 0 or selected not in self._plate_data:
+            return
+        detections = self._plate_data[selected].detections
+
+        for entry in accepted:
+            boxes = detections.get(entry.frame_no)
+            if not boxes or entry.box_idx >= len(boxes):
+                continue
+            # Replace the box in-place; refinement preserves metadata already.
+            boxes[entry.box_idx] = entry.after
+
+        self._save_plates()
+        # Overlay re-sync + visibility are handled by the deferred restore in
+        # ``_start_refine`` — issuing them here fights with the dialog-close
+        # hideEvent that fires right after this function returns.
+        self._refresh_plate_list()
+        self._update_frame_buttons()
+
     # --- Button state helpers ---
 
     def _update_frame_buttons(self):
@@ -1748,15 +2006,25 @@ class ReviewPage(QWidget):
         self._btn_detect_frame.setEnabled(has_video and has_clip and not detecting)
 
         # Clear Clip Plates: needs selected clip with plate data
-        clip_has_plates = has_clip and selected in self._plate_data
+        clip_has_plates = (
+            has_clip
+            and selected in self._plate_data
+            and any(self._plate_data[selected].detections.values())
+        )
         self._btn_clear_clip_plates.setEnabled(clip_has_plates and not detecting)
+        # Refine Clip Plates: mirrors Clear Clip Plates enablement.
+        self._btn_refine_clip_plates.setEnabled(clip_has_plates and not detecting)
 
         # Clear Frame Plates: needs current frame with plates
         frame_has_plates = False
         if clip_has_plates:
             frame_num = self._player.frame_at(self._player.current_time)
-            frame_has_plates = frame_num in self._plate_data[selected].detections
+            frame_has_plates = bool(
+                self._plate_data[selected].detections.get(frame_num),
+            )
         self._btn_clear_frame_plates.setEnabled(frame_has_plates and not detecting)
+        # Refine Frame Plates: mirrors Clear Frame Plates enablement.
+        self._btn_refine_frame_plates.setEnabled(frame_has_plates and not detecting)
 
         # Preview Blur: needs clip with plate data
         self._btn_preview_blur.setEnabled(clip_has_plates and not detecting)

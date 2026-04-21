@@ -14,7 +14,6 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QRadioButton,
-    QSlider,
     QSpinBox,
     QVBoxLayout,
     QWidget,

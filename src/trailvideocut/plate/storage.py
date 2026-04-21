@@ -36,8 +36,9 @@ def save_plates(
     for clip_idx, cpd in plate_data.items():
         detections: dict[str, list[dict]] = {}
         for frame, boxes in cpd.detections.items():
-            detections[str(frame)] = [
-                {
+            entries: list[dict] = []
+            for b in boxes:
+                entry: dict = {
                     "x": float(b.x),
                     "y": float(b.y),
                     "w": float(b.w),
@@ -45,8 +46,12 @@ def save_plates(
                     "confidence": float(b.confidence),
                     "manual": bool(b.manual),
                 }
-                for b in boxes
-            ]
+                # Omit ``angle`` when axis-aligned so older readers (and diffs)
+                # stay identical to the pre-refinement sidecar format.
+                if float(b.angle) != 0.0:
+                    entry["angle"] = float(b.angle)
+                entries.append(entry)
+            detections[str(frame)] = entries
         clip_payload: dict = {
             "clip_index": cpd.clip_index,
             "detections": detections,
@@ -103,6 +108,15 @@ def load_plates(
                 continue
             boxes = []
             for b in box_list:
+                try:
+                    angle = float(b.get("angle", 0.0))
+                except (TypeError, ValueError):
+                    logger.warning(
+                        "Malformed angle in plates file %s (frame %s); defaulting to 0.0",
+                        path,
+                        frame_key,
+                    )
+                    angle = 0.0
                 boxes.append(
                     PlateBox(
                         x=float(b["x"]),
@@ -111,6 +125,7 @@ def load_plates(
                         h=float(b["h"]),
                         confidence=float(b.get("confidence", 0.0)),
                         manual=bool(b.get("manual", False)),
+                        angle=angle,
                     )
                 )
             if boxes:

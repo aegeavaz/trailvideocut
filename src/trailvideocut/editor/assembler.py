@@ -4,7 +4,6 @@ import subprocess
 import threading
 from collections.abc import Callable
 from fractions import Fraction
-from pathlib import Path
 
 from rich.console import Console
 from rich.progress import Progress, BarColumn, TimeRemainingColumn, TextColumn

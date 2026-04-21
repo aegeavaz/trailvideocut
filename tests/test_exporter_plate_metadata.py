@@ -22,12 +22,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import opentimelineio as otio
 
 from trailvideocut.editor.exporter import (
     _build_clip_detections,
     _generate_otio_timeline,
-    _seconds_to_rational_time,
 )
 from trailvideocut.editor.models import CutPlan, EditDecision
 from trailvideocut.editor.resolve_script import generate_resolve_script

@@ -73,6 +73,12 @@ class PlateDetector:
     PLATE_ASPECT_MIN = 0.5  # min width/height ratio (motorcycle plates can be ~1.2-1.4)
     PLATE_ASPECT_MAX = 2.0  # max width/height ratio
 
+    # Outward padding applied to every detected box, as a fraction of the box
+    # size on each side. A small margin gives the post-process refinement
+    # some slack to search for the plate's true outline; YOLO boxes are
+    # otherwise tight and leave no room for refinement.
+    DETECTION_PADDING = 0.15
+
     # "Dashboard" exclusion: masks the user's own bike / mounted phone area at
     # the bottom of the frame. COCO 'cell phone' (class 67) is unreliable for
     # dashboard-mounted GPS phones — yolov8n misclassifies them as 'cup', etc.
@@ -756,6 +762,25 @@ class PlateDetector:
 
         if len(boxes) > 1:
             boxes = self._nms(boxes, iou_threshold=0.5)
+
+        # Grow each surviving detection by a fixed fraction so the blur /
+        # refinement pipeline has some slack to work with. Padding is applied
+        # after NMS so overlap-based suppression still uses tight boxes.
+        if self.DETECTION_PADDING > 0:
+            padded: list[PlateBox] = []
+            for b in boxes:
+                pw = b.w * self.DETECTION_PADDING
+                ph = b.h * self.DETECTION_PADDING
+                new_x = max(0.0, b.x - pw)
+                new_y = max(0.0, b.y - ph)
+                new_x2 = min(1.0, b.x + b.w + pw)
+                new_y2 = min(1.0, b.y + b.h + ph)
+                padded.append(PlateBox(
+                    x=new_x, y=new_y,
+                    w=new_x2 - new_x, h=new_y2 - new_y,
+                    confidence=b.confidence, manual=b.manual,
+                ))
+            boxes = padded
 
         return boxes
 

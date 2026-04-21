@@ -190,6 +190,102 @@ class TestPhoneZonesPersisted:
         assert loaded[0].phone_zones == {}
 
 
+class TestAnglePersistence:
+    """refine-plate-box-fit: optional per-detection ``angle`` field."""
+
+    def test_axis_aligned_sidecar_omits_angle_key(self, tmp_path):
+        video = tmp_path / "trail.mp4"
+        video.touch()
+        data = {
+            0: ClipPlateData(
+                clip_index=0,
+                detections={1: [PlateBox(0.1, 0.2, 0.05, 0.03, 0.9)]},
+            ),
+        }
+        save_plates(video, data)
+        raw = json.loads(get_plates_path(video).read_text(encoding="utf-8"))
+        entry = raw["clips"]["0"]["detections"]["1"][0]
+        assert "angle" not in entry
+
+    def test_oriented_sidecar_writes_angle(self, tmp_path):
+        video = tmp_path / "trail.mp4"
+        video.touch()
+        data = {
+            0: ClipPlateData(
+                clip_index=0,
+                detections={
+                    1: [
+                        PlateBox(0.1, 0.2, 0.05, 0.03, 0.9, manual=False, angle=0.0),
+                        PlateBox(0.4, 0.3, 0.08, 0.04, 0.8, manual=True, angle=12.5),
+                    ]
+                },
+            ),
+        }
+        save_plates(video, data)
+        raw = json.loads(get_plates_path(video).read_text(encoding="utf-8"))
+        entries = raw["clips"]["0"]["detections"]["1"]
+        assert "angle" not in entries[0]  # axis-aligned -> omitted
+        assert entries[1]["angle"] == pytest.approx(12.5)
+
+    def test_angle_round_trip(self, tmp_path):
+        video = tmp_path / "trail.mp4"
+        video.touch()
+        orig = PlateBox(0.4, 0.3, 0.08, 0.04, 0.8, manual=True, angle=-27.75)
+        data = {
+            0: ClipPlateData(clip_index=0, detections={5: [orig]}),
+        }
+        save_plates(video, data)
+        loaded = load_plates(video)
+        got = loaded[0].detections[5][0]
+        assert got.angle == pytest.approx(orig.angle, abs=1e-6)
+        assert got.manual is True
+
+    def test_legacy_sidecar_without_angle_loads_as_zero(self, tmp_path):
+        video = tmp_path / "legacy.mp4"
+        video.touch()
+        sidecar = tmp_path / "legacy.plates.json"
+        sidecar.write_text(json.dumps({
+            "version": 2,
+            "video_file": "legacy.mp4",
+            "clips": {
+                "0": {
+                    "clip_index": 0,
+                    "detections": {
+                        "7": [{"x": 0.1, "y": 0.2, "w": 0.05, "h": 0.03,
+                               "confidence": 0.9, "manual": False}],
+                    },
+                },
+            },
+        }), encoding="utf-8")
+
+        loaded = load_plates(video)
+        got = loaded[0].detections[7][0]
+        assert got.angle == 0.0
+
+    def test_malformed_angle_falls_back_to_zero(self, tmp_path):
+        video = tmp_path / "bad.mp4"
+        video.touch()
+        sidecar = tmp_path / "bad.plates.json"
+        sidecar.write_text(json.dumps({
+            "version": 2,
+            "video_file": "bad.mp4",
+            "clips": {
+                "0": {
+                    "clip_index": 0,
+                    "detections": {
+                        "3": [{"x": 0.1, "y": 0.2, "w": 0.05, "h": 0.03,
+                               "confidence": 0.9, "manual": False,
+                               "angle": "not-a-number"}],
+                    },
+                },
+            },
+        }), encoding="utf-8")
+
+        loaded = load_plates(video)
+        got = loaded[0].detections[3][0]
+        assert got.angle == 0.0
+
+
 class TestDeletePlates:
     def test_delete_removes_sidecar(self, tmp_path, sample_plate_data):
         video = tmp_path / "trail.mp4"

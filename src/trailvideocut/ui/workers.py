@@ -2,8 +2,13 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import TYPE_CHECKING, Callable
 
 from PySide6.QtCore import QThread, Signal
+
+if TYPE_CHECKING:
+    from trailvideocut.plate.models import PlateBox
+    from trailvideocut.plate.refiner import RefinerConfig
 
 from trailvideocut.audio.analyzer import AudioAnalyzer
 from trailvideocut.audio.energy_curve import (
@@ -250,6 +255,135 @@ class PlateDetectionWorker(QThread):
             self.finished.emit(results)
         except Exception as e:
             self.error.emit(str(e))
+
+
+class PlateRefineWorker(QThread):
+    """Runs plate-box refinement over an existing detection set.
+
+    The worker is task-agnostic to the scope (whole clip vs current frame):
+    the caller passes in ``frames_and_boxes`` — a list of
+    ``(frame_no, [(box_idx, box), ...])`` entries — and the worker iterates
+    them in frame-order, decoding each frame once and refining every box on
+    it.
+
+    Signals
+    -------
+    progress(done, total) : int, int
+        Emitted at least once per frame. ``total`` is the total box count.
+    frame_done(frame_no, box_idx, before, after, confidence, method) :
+        Emitted once per refined box.
+    finished(results) : object
+        ``list[tuple[int, int, PlateBox, PlateBox, float, str]]`` in the
+        same shape the UI needs to rebuild its review table.
+    cancelled() :
+        Emitted after a cooperative stop. ``finished`` is NOT also emitted.
+    error(str) :
+        Unrecoverable failure (e.g. can't open video).
+    """
+
+    progress = Signal(int, int)
+    frame_done = Signal(int, int, object, object, float, str)
+    finished = Signal(object)
+    cancelled = Signal()
+    error = Signal(str)
+
+    def __init__(
+        self,
+        video_path: str | Path,
+        frames_and_boxes: list[tuple[int, list[tuple[int, "PlateBox"]]]],
+        cfg: "RefinerConfig | None" = None,
+        refine_fn: "Callable | None" = None,
+        frame_provider: "Callable | None" = None,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self._video_path = str(video_path)
+        self._frames_and_boxes = list(frames_and_boxes)
+        self._cfg = cfg
+        # ``refine_fn`` and ``frame_provider`` are injected for tests;
+        # production code uses the real ones.
+        self._refine_fn = refine_fn
+        self._frame_provider = frame_provider
+        self._cancelled = False
+
+    def stop(self) -> None:
+        self._cancelled = True
+
+    def run(self) -> None:
+        self._run_impl()
+
+    def _run_impl(self) -> None:
+        if self._refine_fn is None:
+            from trailvideocut.plate.refiner import RefinerConfig, refine_box
+
+            refine_fn = refine_box
+            cfg = self._cfg or RefinerConfig()
+        else:
+            refine_fn = self._refine_fn
+            cfg = self._cfg
+
+        # Frame provider: default is an OpenCV-backed capture on ``video_path``.
+        frame_provider = self._frame_provider
+        cap = None
+        if frame_provider is None:
+            import cv2
+            cap = cv2.VideoCapture(self._video_path)
+            if not cap.isOpened():
+                self.error.emit(f"Cannot open video: {self._video_path}")
+                return
+
+            def _cv2_provider(frame_no: int):
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_no)
+                ret, frame = cap.read()
+                return frame if ret else None
+
+            frame_provider = _cv2_provider
+
+        total_boxes = sum(len(pairs) for _, pairs in self._frames_and_boxes)
+        done = 0
+        self.progress.emit(done, total_boxes)
+
+        results: list = []
+        try:
+            for frame_no, pairs in sorted(self._frames_and_boxes, key=lambda e: e[0]):
+                if self._cancelled:
+                    self.cancelled.emit()
+                    return
+                frame = frame_provider(frame_no)
+                if frame is None:
+                    # Skip missing frames; advance the progress counter anyway.
+                    done += len(pairs)
+                    self.progress.emit(done, total_boxes)
+                    continue
+
+                for box_idx, box in pairs:
+                    if self._cancelled:
+                        self.cancelled.emit()
+                        return
+                    if cfg is not None:
+                        result = refine_fn(frame, box, cfg)
+                    else:
+                        result = refine_fn(frame, box)
+                    done += 1
+                    self.frame_done.emit(
+                        frame_no, box_idx, box, result.box,
+                        float(result.confidence), str(result.method),
+                    )
+                    details = getattr(result, "details", {}) or {}
+                    results.append(
+                        (frame_no, box_idx, box, result.box,
+                         float(result.confidence), str(result.method),
+                         dict(details)),
+                    )
+                self.progress.emit(done, total_boxes)
+        finally:
+            if cap is not None:
+                cap.release()
+
+        if self._cancelled:
+            self.cancelled.emit()
+            return
+        self.finished.emit(results)
 
 
 class ModelDownloadWorker(QThread):
