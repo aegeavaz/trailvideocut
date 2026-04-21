@@ -197,6 +197,32 @@ class TestProjectManualBoxSpecScenarios:
         assert project_manual_box(detections, current_frame=25) is None
 
 
+class TestProjectManualBoxAngleInheritance:
+    """fix-plate-box-handlers: projected box carries the nearest reference's
+    rotation so the manual add path can match surrounding plates instead of
+    snapping to axis-aligned."""
+
+    def test_projected_angle_matches_nearest_reference(self):
+        near = PlateBox(x=0.45 - 0.06, y=0.5 - 0.035, w=0.12, h=0.07, angle=15.0)
+        far = PlateBox(x=0.40 - 0.10, y=0.5 - 0.05, w=0.20, h=0.10, angle=-5.0)
+        detections = {40: [far], 50: [near]}
+        box = project_manual_box(detections, current_frame=60)
+        assert box is not None
+        # Nearest reference for frame 60 is frame 50 → angle 15°.
+        assert box.angle == pytest.approx(15.0)
+
+    def test_clamped_projection_preserves_angle(self):
+        # Force clamping (centre would push envelope outside [0,1]) and
+        # verify the angle survives the _clamp_box path.
+        detections = {
+            40: [PlateBox(x=0.80, y=0.50, w=0.20, h=0.10, angle=10.0)],
+            50: [PlateBox(x=0.90, y=0.50, w=0.20, h=0.10, angle=10.0)],
+        }
+        box = project_manual_box(detections, current_frame=60)
+        assert box is not None
+        assert box.angle == pytest.approx(10.0)
+
+
 class TestProjectManualBoxNoQtImport:
     def test_module_has_no_qt_dependency(self):
         import sys

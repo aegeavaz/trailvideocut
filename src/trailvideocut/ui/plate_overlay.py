@@ -361,6 +361,20 @@ class PlateOverlayWidget(QWidget):
             return []
         return self._clip_data.detections.get(self._current_frame, [])
 
+    def _oriented_corners_widget(self, box: PlateBox) -> list[QPointF]:
+        """Return the four corners of *box* as widget-pixel ``QPointF`` in
+        TL, TR, BR, BL order (of the plate-aligned rectangle, before rotation).
+
+        Rotation is computed in video-pixel space (not in a normalized 1x1
+        space). The single helper keeps the outline renderer and the handle
+        anchor points fed from the same geometry, so they cannot drift.
+        """
+        vr = self._video_rect()
+        corners = box.corners_px(vr.width(), vr.height())
+        return [
+            QPointF(vr.x() + x, vr.y() + y) for x, y in corners
+        ]
+
     # --- Paint ---
 
     def paintEvent(self, event):
@@ -423,19 +437,7 @@ class PlateOverlayWidget(QWidget):
             if box.angle == 0.0:
                 painter.drawRect(rect)
             else:
-                # Oriented outline: draw the rotated quadrilateral. Use the
-                # same video-rect mapping that _norm_to_widget uses.
-                vr = self._video_rect()
-                corners_norm = box.corners_px(1.0, 1.0)
-                poly = QPolygonF(
-                    [
-                        QPointF(
-                            vr.x() + nx * vr.width(),
-                            vr.y() + ny * vr.height(),
-                        )
-                        for nx, ny in corners_norm
-                    ]
-                )
+                poly = QPolygonF(self._oriented_corners_widget(box))
                 painter.drawPolygon(poly)
 
             # Resize + rotate handles for selected box — on the rotated rect.
@@ -468,15 +470,7 @@ class PlateOverlayWidget(QWidget):
         rectangle. For axis-aligned boxes (``angle == 0``) the positions
         coincide with the AABB corners + edge midpoints.
         """
-        vr = self._video_rect()
-        # ``corners_px`` returns the four corners of the plate-aligned
-        # rectangle in order TL, TR, BR, BL *before* rotation is applied —
-        # but the implementation already includes rotation.
-        corners = box.corners_px(vr.width(), vr.height())
-        tl = QPointF(vr.x() + corners[0][0], vr.y() + corners[0][1])
-        tr = QPointF(vr.x() + corners[1][0], vr.y() + corners[1][1])
-        br = QPointF(vr.x() + corners[2][0], vr.y() + corners[2][1])
-        bl = QPointF(vr.x() + corners[3][0], vr.y() + corners[3][1])
+        tl, tr, br, bl = self._oriented_corners_widget(box)
 
         def _mid(a: QPointF, b: QPointF) -> QPointF:
             return QPointF((a.x() + b.x()) / 2.0, (a.y() + b.y()) / 2.0)
@@ -729,22 +723,26 @@ class PlateOverlayWidget(QWidget):
 
     def _point_in_box(self, pos: QPointF, box: PlateBox) -> bool:
         """Return True if the widget-coord point *pos* lies inside the
-        (possibly rotated) plate-aligned rectangle of *box*."""
+        (possibly rotated) plate-aligned rectangle of *box*.
+
+        Hit-test math lives in video-pixel space so non-square videos do not
+        distort the rotation.
+        """
         vr = self._video_rect()
         if vr.width() <= 0 or vr.height() <= 0:
             return False
-        # Map pos into normalized video coordinates.
-        nx = (pos.x() - vr.x()) / vr.width()
-        ny = (pos.y() - vr.y()) / vr.height()
-        cx = box.x + box.w / 2.0
-        cy = box.y + box.h / 2.0
-        # Express the point in plate-aligned coords.
-        rad = math.radians(box.angle)
-        cos_a = math.cos(-rad)
-        sin_a = math.sin(-rad)
-        local_x = (nx - cx) * cos_a - (ny - cy) * sin_a
-        local_y = (nx - cx) * sin_a + (ny - cy) * cos_a
-        return abs(local_x) <= box.w / 2.0 and abs(local_y) <= box.h / 2.0
+        cx_px = vr.x() + (box.x + box.w / 2.0) * vr.width()
+        cy_px = vr.y() + (box.y + box.h / 2.0) * vr.height()
+        dx = pos.x() - cx_px
+        dy = pos.y() - cy_px
+        rad = math.radians(-box.angle)
+        cos_a = math.cos(rad)
+        sin_a = math.sin(rad)
+        local_x = dx * cos_a - dy * sin_a
+        local_y = dx * sin_a + dy * cos_a
+        half_w_px = box.w * vr.width() / 2.0
+        half_h_px = box.h * vr.height() / 2.0
+        return abs(local_x) <= half_w_px and abs(local_y) <= half_h_px
 
     def _apply_rotate(self, pos: QPointF, box: PlateBox):
         """Rotation-handle drag: rotate the box so the rotation handle
@@ -768,29 +766,34 @@ class PlateOverlayWidget(QWidget):
         """Resize that preserves rotation. The handle's opposite reference
         (corner or edge) stays fixed in widget coordinates; the new
         plate-aligned ``(w, h)`` are computed by projecting the mouse offset
-        from that reference onto the box's local axes.
+        from that reference onto the box's local axes **in pixel space**,
+        then converted back to normalized coordinates. Doing the projection
+        in pixel space is what keeps oriented boxes as rectangles on
+        non-square videos.
         """
         vr = self._video_rect()
+        vw = max(1.0, vr.width())
+        vh = max(1.0, vr.height())
         ocx, ocy, ow, oh, oangle = self._drag_box_start
-        min_w_norm = _MIN_BOX_PX / max(1.0, vr.width())
-        min_h_norm = _MIN_BOX_PX / max(1.0, vr.height())
 
-        # Plate's local axes in normalized video coords.
+        # Original centre + extents in pixel space.
+        ocx_px = ocx * vw
+        ocy_px = ocy * vh
+        ow_px = ow * vw
+        oh_px = oh * vh
+
+        # Plate's local axes as proper unit vectors in pixel space.
         rad = math.radians(oangle)
         ux, uy = math.cos(rad), math.sin(rad)          # plate-horizontal
         vx, vy = -math.sin(rad), math.cos(rad)          # plate-vertical
 
-        # Pos expressed in normalized video coords.
-        mouse_nx = (pos.x() - vr.x()) / vr.width()
-        mouse_ny = (pos.y() - vr.y()) / vr.height()
+        # Mouse in video-pixel coords.
+        mouse_x = pos.x() - vr.x()
+        mouse_y = pos.y() - vr.y()
 
-        # The reference point of each handle in the original plate-aligned
-        # frame: offset from centre along (u, v) axes in plate units
-        # (x component in multiples of ow/2, y component in multiples of
-        # oh/2). "l" means the reference is the left edge mid-point (so we
-        # record (-1, 0)); "br" uses the top-left corner ("-1, -1"); etc.
+        # Fixed reference in plate-local multiples of (ow_px/2, oh_px/2).
         ref_plate = {
-            "l":  (+1,  0),  # dragging "l" — left edge moves, right edge fixed
+            "l":  (+1,  0),
             "r":  (-1,  0),
             "t":  ( 0, +1),
             "b":  ( 0, -1),
@@ -801,55 +804,49 @@ class PlateOverlayWidget(QWidget):
         }.get(self._resize_handle, (0, 0))
         ref_u, ref_v = ref_plate
 
-        # Fixed reference point in normalized video coords.
-        ref_nx = ocx + ref_u * (ow / 2) * ux + ref_v * (oh / 2) * vx
-        ref_ny = ocy + ref_u * (ow / 2) * uy + ref_v * (oh / 2) * vy
+        # Fixed reference point in video-pixel coords.
+        ref_x_px = ocx_px + ref_u * (ow_px / 2) * ux + ref_v * (oh_px / 2) * vx
+        ref_y_px = ocy_px + ref_u * (ow_px / 2) * uy + ref_v * (oh_px / 2) * vy
 
-        # Vector from reference to mouse, in normalized coords.
-        rx = mouse_nx - ref_nx
-        ry = mouse_ny - ref_ny
-
-        # Project onto the plate's local axes.
-        proj_u = rx * ux + ry * uy     # plate-horizontal extent from ref
+        # Project the reference→mouse vector onto the plate's local axes.
+        rx = mouse_x - ref_x_px
+        ry = mouse_y - ref_y_px
+        proj_u = rx * ux + ry * uy     # plate-horizontal pixels from ref
         proj_v = rx * vx + ry * vy     # plate-vertical
 
-        # For each moving axis, the new plate dimension is |projection|.
-        # "l"/"r" handles only change width; "t"/"b" only change height;
-        # corners change both.
         handle = self._resize_handle
-        new_w = ow
-        new_h = oh
+        new_w_px = ow_px
+        new_h_px = oh_px
         if handle in ("l", "r", "tl", "tr", "bl", "br"):
-            new_w = max(min_w_norm, abs(proj_u))
+            new_w_px = max(_MIN_BOX_PX, abs(proj_u))
         if handle in ("t", "b", "tl", "tr", "bl", "br"):
-            new_h = max(min_h_norm, abs(proj_v))
+            new_h_px = max(_MIN_BOX_PX, abs(proj_v))
 
-        # New centre: halfway from the fixed reference to the dragged point,
-        # in plate-aligned coords (so rotation is preserved).
-        # When width/height are clamped to their minima, fall back to the
-        # half-extent along that axis.
-        cu = (new_w / 2) * (1 if ref_u <= 0 else -1) if handle in (
+        # New centre: half-extents away from the reference along local axes.
+        # Sign flips because ref_u = +1 means the reference sits at the
+        # +u side and the centre is toward -u.
+        cu = (new_w_px / 2) * (1 if ref_u <= 0 else -1) if handle in (
             "l", "r", "tl", "tr", "bl", "br"
-        ) else (ow / 2) * (1 if ref_u <= 0 else -1)
-        cv = (new_h / 2) * (1 if ref_v <= 0 else -1) if handle in (
+        ) else (ow_px / 2) * (1 if ref_u <= 0 else -1)
+        cv = (new_h_px / 2) * (1 if ref_v <= 0 else -1) if handle in (
             "t", "b", "tl", "tr", "bl", "br"
-        ) else (oh / 2) * (1 if ref_v <= 0 else -1)
-        # For non-moving axes (e.g. edge handles), keep the original centre
-        # component so the opposite edge stays anchored.
-        if handle == "l" or handle == "r":
-            # Height axis unchanged; keep original centre on that axis.
+        ) else (oh_px / 2) * (1 if ref_v <= 0 else -1)
+        # Edge handles leave the non-moving axis at its original centre.
+        if handle in ("l", "r"):
             cv = 0
-        if handle == "t" or handle == "b":
+        if handle in ("t", "b"):
             cu = 0
 
-        new_cx = ref_nx + cu * ux + cv * vx
-        new_cy = ref_ny + cu * uy + cv * vy
+        new_cx_px = ref_x_px + cu * ux + cv * vx
+        new_cy_px = ref_y_px + cu * uy + cv * vy
 
-        new_x = new_cx - new_w / 2
-        new_y = new_cy - new_h / 2
+        new_w = new_w_px / vw
+        new_h = new_h_px / vh
+        new_cx = new_cx_px / vw
+        new_cy = new_cy_px / vh
 
-        box.x = new_x
-        box.y = new_y
+        box.x = new_cx - new_w / 2
+        box.y = new_cy - new_h / 2
         box.w = new_w
         box.h = new_h
         box.angle = oangle

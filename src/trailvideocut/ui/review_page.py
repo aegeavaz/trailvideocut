@@ -1419,12 +1419,12 @@ class ReviewPage(QWidget):
         if projected is not None:
             new_box = PlateBox(
                 x=projected.x, y=projected.y, w=projected.w, h=projected.h,
-                confidence=0.0, manual=True,
+                confidence=0.0, manual=True, angle=projected.angle,
             )
         elif (ref := self._plate_overlay.find_nearest_reference_box()) is not None:
             new_box = PlateBox(
                 x=ref.x, y=ref.y, w=ref.w, h=ref.h,
-                confidence=0.0, manual=True,
+                confidence=0.0, manual=True, angle=ref.angle,
             )
         else:
             # Resolve cursor position for fallback placement
@@ -1456,6 +1456,7 @@ class ReviewPage(QWidget):
         """Handle box modification (add/move/resize/delete) — refresh list and save."""
         self._refresh_plate_list()
         self._save_plates()
+        self._update_frame_buttons()
         if self._btn_preview_blur.isChecked():
             self._update_blur_preview()
 
@@ -1518,10 +1519,15 @@ class ReviewPage(QWidget):
 
         tiles = []
         for box in boxes:
-            x1 = max(0, int(box.x * fw))
-            y1 = max(0, int(box.y * fh))
-            x2 = min(fw, int((box.x + box.w) * fw))
-            y2 = min(fh, int((box.y + box.h) * fh))
+            # Crop the AABB envelope, not the plate-aligned rect, so oriented
+            # plates render their full rotated blur patch (the envelope's
+            # outer triangles carry untouched video pixels — redrawing them
+            # over the same video is a visual no-op).
+            env_x, env_y, env_w, env_h = box.aabb_envelope()
+            x1 = max(0, int(env_x * fw))
+            y1 = max(0, int(env_y * fh))
+            x2 = min(fw, int((env_x + env_w) * fw))
+            y2 = min(fh, int((env_y + env_h) * fh))
             if x2 - x1 < 2 or y2 - y1 < 2:
                 continue
 
@@ -1531,7 +1537,7 @@ class ReviewPage(QWidget):
             h, w = region_rgb.shape[:2]
             qimg = QImage(region_rgb.data, w, h, w * 3, QImage.Format_RGB888)
             pixmap = QPixmap.fromImage(qimg)
-            tiles.append(((box.x, box.y, box.w, box.h), pixmap))
+            tiles.append(((env_x, env_y, env_w, env_h), pixmap))
 
         self._plate_overlay.set_blur_tiles(tiles)
 

@@ -14,7 +14,9 @@ def _center(box: PlateBox) -> tuple[float, float]:
     return (box.x + box.w / 2, box.y + box.h / 2)
 
 
-def _clamp_box(cx: float, cy: float, w: float, h: float) -> PlateBox:
+def _clamp_box(
+    cx: float, cy: float, w: float, h: float, angle: float = 0.0,
+) -> PlateBox:
     x = cx - w / 2
     y = cy - h / 2
     # Size first, then position, so a box smaller than the frame always fits.
@@ -22,7 +24,7 @@ def _clamp_box(cx: float, cy: float, w: float, h: float) -> PlateBox:
     h = max(0.0, min(1.0, h))
     x = max(0.0, min(1.0 - w, x))
     y = max(0.0, min(1.0 - h, y))
-    return PlateBox(x=x, y=y, w=w, h=h)
+    return PlateBox(x=x, y=y, w=w, h=h, angle=angle)
 
 
 def _pick_samples(
@@ -92,7 +94,9 @@ def project_manual_box(
     cx = ox + (nx - ox) * t
     cy = oy + (ny - oy) * t
 
-    # Size from the reference frame closest to current_frame.
+    # Size and angle from the reference frame closest to current_frame.
     nearest_box = newer_box if abs(newer - current_frame) <= abs(older - current_frame) else older_box
 
-    return _clamp_box(cx, cy, nearest_box.w, nearest_box.h)
+    return _clamp_box(
+        cx, cy, nearest_box.w, nearest_box.h, angle=nearest_box.angle,
+    )
